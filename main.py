@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 import time
@@ -14,9 +15,9 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Configuration ───
-BASE_URL = "https://anime3rb.vip"
-USERNAME = "bbnmnbb"
-PASSWORD = "as209509"
+BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
+USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
+PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
 
 # ─── Cloudscraper session ───
 scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
