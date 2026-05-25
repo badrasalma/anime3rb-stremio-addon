@@ -624,7 +624,7 @@ def stremio_response(data: dict) -> Response:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_bytes / 1024 / 1024, 1)}
+    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_mb(), 1)}
 
 
 @app.get("/manifest.json")
