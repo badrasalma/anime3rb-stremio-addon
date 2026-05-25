@@ -81,9 +81,15 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
         url += f"&action={action}"
     if extra:
         url += extra
-    r = scraper.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = scraper.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[API] cloudscraper failed: {e}, trying requests...")
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
 
 
 def get_series_categories() -> list[dict]:
@@ -113,9 +119,18 @@ def get_all_series() -> list[dict]:
     cached = cache_get("all_series")
     if cached:
         return cached
-    data = _trim(api_call("get_series"), _SERIES_FIELDS)
-    cache_set("all_series", data)
-    return data
+    try:
+        raw = api_call("get_series")
+        if not isinstance(raw, list):
+            print(f"[API] get_series returned {type(raw).__name__}, expected list")
+            return []
+        data = _trim(raw, _SERIES_FIELDS)
+        print(f"[API] Loaded {len(data)} series")
+        cache_set("all_series", data)
+        return data
+    except Exception as e:
+        print(f"[API] Failed to load series: {e}")
+        return []
 
 
 def get_series_info(series_id: str) -> dict:
@@ -605,6 +620,11 @@ def stremio_response(data: dict) -> Response:
         media_type="application/json",
         headers={"Access-Control-Allow-Origin": "*"},
     )
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_bytes / 1024 / 1024, 1)}
 
 
 @app.get("/manifest.json")
