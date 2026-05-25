@@ -1,0 +1,11 @@
+[project]
+name = "anime3rb-stremio-addon"
+version = "1.0.0"
+description = "Stremio addon for anime3rb.vip Xtream Code IPTV"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "uvicorn>=0.34.0",
+    "cloudscraper>=1.2.71",
+    "requests>=2.31.0",
+]
