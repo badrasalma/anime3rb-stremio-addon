@@ -624,7 +624,17 @@ def stremio_response(data: dict) -> Response:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_mb(), 1)}
+    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_mb(), 1), "base_url": BASE_URL, "user": USERNAME[:3] + "***"}
+
+
+@app.get("/test_api")
+def test_api():
+    try:
+        url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
+        r = requests.get(url, timeout=15)
+        return {"status": r.status_code, "length": len(r.text), "preview": r.text[:200]}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/manifest.json")
