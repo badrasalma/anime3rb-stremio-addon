@@ -629,12 +629,19 @@ def health():
 
 @app.get("/test_api")
 def test_api():
+    results = {}
+    url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
     try:
-        url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
-        r = requests.get(url, timeout=15)
-        return {"status": r.status_code, "length": len(r.text), "preview": r.text[:200]}
+        r = scraper.get(url, timeout=20)
+        results["cloudscraper"] = {"status": r.status_code, "length": len(r.text), "ok": r.status_code == 200}
     except Exception as e:
-        return {"error": str(e)}
+        results["cloudscraper"] = {"error": str(e)}
+    try:
+        r = requests.get(url, timeout=20)
+        results["requests"] = {"status": r.status_code, "length": len(r.text), "ok": r.status_code == 200}
+    except Exception as e:
+        results["requests"] = {"error": str(e)}
+    return results
 
 
 @app.get("/manifest.json")
