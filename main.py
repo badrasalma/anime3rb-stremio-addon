@@ -8,9 +8,13 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
+from pathlib import Path
 
 import requests
-import cloudscraper
+try:
+    import cloudscraper
+except ImportError:
+    cloudscraper = None
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,8 +23,16 @@ BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
 USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
 PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
 
+# GitHub raw URL for cached data files
+GITHUB_DATA_URL = os.environ.get(
+    "GITHUB_DATA_URL",
+    "https://raw.githubusercontent.com/badrasalma/anime3rb-stremio-addon/devin/deploy/data"
+)
+# Set USE_CACHED=1 to use pre-cached data files instead of live API
+USE_CACHED = os.environ.get("USE_CACHED", "0") == "1"
+
 # ─── Cloudscraper session ───
-scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
+scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"}) if cloudscraper else None
 
 # ─── Cache ───
 CACHE_TTL = 6 * 60 * 60  # 6 hours for lists (series/VOD catalogs)
@@ -74,6 +86,52 @@ def cache_set(key: str, val: Any) -> None:
         _evict_if_needed()
 
 
+# ─── Pre-cached data store ───
+_cached_episodes: dict = {}  # series_id -> episode data (loaded from GitHub)
+_cached_data_ts: float = 0  # timestamp of last data reload
+CACHED_DATA_TTL = 6 * 60 * 60  # Reload cached data every 6 hours
+
+
+def _load_github_json(filename: str) -> Any:
+    """Download a JSON file from the GitHub data directory."""
+    url = f"{GITHUB_DATA_URL}/{filename}"
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[GitHub] Failed to load {filename}: {e}")
+        return None
+
+
+def _load_local_json(filename: str) -> Any:
+    """Load a JSON file from local data directory."""
+    data_dir = Path(__file__).parent / "data"
+    fpath = data_dir / filename
+    if fpath.exists():
+        with open(fpath) as f:
+            return json.load(f)
+    return None
+
+
+def _load_cached_data() -> None:
+    """Load pre-cached data from GitHub or local files."""
+    global _cached_episodes, _cached_data_ts
+    if time.time() - _cached_data_ts < CACHED_DATA_TTL and _cached_episodes:
+        return  # Already loaded and fresh
+
+    print("[Cache] Loading pre-cached data...")
+    # Try local first, then GitHub
+    for loader_name, loader in [("local", _load_local_json), ("GitHub", _load_github_json)]:
+        eps = loader("episodes.json")
+        if eps and isinstance(eps, dict) and len(eps) > 0:
+            _cached_episodes = eps
+            _cached_data_ts = time.time()
+            print(f"[Cache] Loaded {len(eps)} series episode data from {loader_name}")
+            return
+    print("[Cache] WARNING: No pre-cached episode data available")
+
+
 # ─── Xtream API ───
 def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
@@ -82,9 +140,12 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
     if extra:
         url += extra
     try:
-        r = scraper.get(url, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+        if scraper:
+            r = scraper.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        else:
+            raise RuntimeError("cloudscraper not available")
     except Exception as e:
         print(f"[API] cloudscraper failed: {e}, trying requests...")
         r = requests.get(url, timeout=timeout)
@@ -96,9 +157,16 @@ def get_series_categories() -> list[dict]:
     cached = cache_get("series_categories")
     if cached:
         return cached
-    data = api_call("get_series_categories")
-    cache_set("series_categories", data)
-    return data
+    # Try pre-cached files
+    data = _load_local_json("categories.json") or _load_github_json("categories.json")
+    if data:
+        cache_set("series_categories", data)
+        return data
+    if not USE_CACHED:
+        data = api_call("get_series_categories")
+        cache_set("series_categories", data)
+        return data
+    return []
 
 
 _SERIES_FIELDS = {"name", "series_id", "cover", "plot", "genre", "category_id", "rating", "releaseDate"}
@@ -119,18 +187,25 @@ def get_all_series() -> list[dict]:
     cached = cache_get("all_series")
     if cached:
         return cached
-    try:
-        raw = api_call("get_series")
-        if not isinstance(raw, list):
-            print(f"[API] get_series returned {type(raw).__name__}, expected list")
-            return []
-        data = _trim(raw, _SERIES_FIELDS)
-        print(f"[API] Loaded {len(data)} series")
+    # Try pre-cached files
+    data = _load_local_json("series_list.json") or _load_github_json("series_list.json")
+    if data and isinstance(data, list):
+        print(f"[Cache] Loaded {len(data)} series from cached files")
         cache_set("all_series", data)
         return data
-    except Exception as e:
-        print(f"[API] Failed to load series: {e}")
-        return []
+    if not USE_CACHED:
+        try:
+            raw = api_call("get_series")
+            if not isinstance(raw, list):
+                print(f"[API] get_series returned {type(raw).__name__}, expected list")
+                return []
+            data = _trim(raw, _SERIES_FIELDS)
+            print(f"[API] Loaded {len(data)} series")
+            cache_set("all_series", data)
+            return data
+        except Exception as e:
+            print(f"[API] Failed to load series: {e}")
+    return []
 
 
 def get_series_info(series_id: str) -> dict:
@@ -138,18 +213,64 @@ def get_series_info(series_id: str) -> dict:
     cached = cache_get(key, SERIES_INFO_TTL)
     if cached:
         return cached
-    data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
-    cache_set(key, data)
-    return data
+    # Check pre-cached episode data
+    _load_cached_data()
+    sid = str(series_id)
+    if sid in _cached_episodes:
+        ep_data = _cached_episodes[sid]
+        # Convert cached format to Xtream API format
+        episodes = {}
+        for season, eps in ep_data.get("episodes", {}).items():
+            episodes[season] = []
+            for ep in eps:
+                episodes[season].append({
+                    "episode_num": ep.get("e"),
+                    "stream_id": ep.get("s"),
+                    "container_extension": ep.get("x", "mp4"),
+                    "title": ep.get("t", ""),
+                })
+        result = {
+            "info": {
+                "name": ep_data.get("name", ""),
+                "cover": ep_data.get("cover", ""),
+                "plot": ep_data.get("plot", ""),
+                "genre": ep_data.get("genre", ""),
+                "rating": ep_data.get("rating", ""),
+                "releaseDate": ep_data.get("releaseDate", ""),
+            },
+            "episodes": episodes,
+        }
+        cache_set(key, result)
+        return result
+    # Fall back to API
+    if not USE_CACHED:
+        try:
+            data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
+            cache_set(key, data)
+            return data
+        except Exception as e:
+            print(f"[API] Failed to get series info {series_id}: {e}")
+    return {}
 
 
 def get_all_vod() -> list[dict]:
     cached = cache_get("all_vod")
     if cached:
         return cached
-    data = _trim(api_call("get_vod_streams"), _VOD_FIELDS)
-    cache_set("all_vod", data)
-    return data
+    # Try pre-cached files
+    data = _load_local_json("vod_list.json") or _load_github_json("vod_list.json")
+    if data and isinstance(data, list):
+        print(f"[Cache] Loaded {len(data)} VOD from cached files")
+        cache_set("all_vod", data)
+        return data
+    if not USE_CACHED:
+        try:
+            data = _trim(api_call("get_vod_streams"), _VOD_FIELDS)
+            cache_set("all_vod", data)
+            return data
+        except Exception as e:
+            print(f"[API] Failed to load VOD: {e}")
+    return []
 
 
 def get_vod_info(vod_id: str) -> dict:
@@ -157,9 +278,14 @@ def get_vod_info(vod_id: str) -> dict:
     cached = cache_get(key)
     if cached:
         return cached
-    data = api_call("get_vod_info", f"&vod_id={vod_id}")
-    cache_set(key, data)
-    return data
+    if not USE_CACHED:
+        try:
+            data = api_call("get_vod_info", f"&vod_id={vod_id}")
+            cache_set(key, data)
+            return data
+        except Exception as e:
+            print(f"[API] Failed to get VOD info {vod_id}: {e}")
+    return {}
 
 
 # ─── Stremio Manifest ───
@@ -570,7 +696,11 @@ def _warm_cache() -> None:
         print("[Cache] Warming: all VOD list...")
         get_all_vod()
         gc.collect()
-        print("[Cache] Warm-up complete!")
+        # Pre-load episode data from cache
+        print("[Cache] Loading pre-cached episode data...")
+        _load_cached_data()
+        gc.collect()
+        print(f"[Cache] Warm-up complete! (episodes: {len(_cached_episodes)} series)")
     except Exception as e:
         print(f"[Cache] Warm-up error: {e}")
 
@@ -590,7 +720,11 @@ def _background_refresh() -> None:
             get_series_categories()
             get_all_series()
             get_all_vod()
-            print("[Cache] Background refresh complete!")
+            # Reload episode data from GitHub/local
+            global _cached_data_ts
+            _cached_data_ts = 0  # Force reload
+            _load_cached_data()
+            print(f"[Cache] Background refresh complete! (episodes: {len(_cached_episodes)} series)")
         except Exception as e:
             print(f"[Cache] Background refresh error: {e}")
 
@@ -624,18 +758,29 @@ def stremio_response(data: dict) -> Response:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "cache_keys": list(_cache.keys()), "cache_size_mb": round(_cache_size_mb(), 1), "base_url": BASE_URL, "user": USERNAME[:3] + "***"}
+    return {
+        "status": "ok",
+        "cache_keys": list(_cache.keys()),
+        "cache_size_mb": round(_cache_size_mb(), 1),
+        "cached_episodes": len(_cached_episodes),
+        "use_cached": USE_CACHED,
+        "base_url": BASE_URL,
+        "user": USERNAME[:3] + "***",
+    }
 
 
 @app.get("/test_api")
 def test_api():
-    results = {}
+    results = {"use_cached": USE_CACHED, "cached_episodes": len(_cached_episodes)}
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
-    try:
-        r = scraper.get(url, timeout=20)
-        results["cloudscraper"] = {"status": r.status_code, "length": len(r.text), "ok": r.status_code == 200}
-    except Exception as e:
-        results["cloudscraper"] = {"error": str(e)}
+    if scraper:
+        try:
+            r = scraper.get(url, timeout=20)
+            results["cloudscraper"] = {"status": r.status_code, "length": len(r.text), "ok": r.status_code == 200}
+        except Exception as e:
+            results["cloudscraper"] = {"error": str(e)}
+    else:
+        results["cloudscraper"] = {"error": "not installed"}
     try:
         r = requests.get(url, timeout=20)
         results["requests"] = {"status": r.status_code, "length": len(r.text), "ok": r.status_code == 200}
