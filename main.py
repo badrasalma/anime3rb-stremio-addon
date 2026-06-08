@@ -388,6 +388,35 @@ def _fetch_kitsu_titles(kitsu_id: str) -> list[str]:
         return []
 
 
+def _find_imdb_id(anime_name: str) -> str | None:
+    """Search Cinemeta for an anime by name and return the IMDB ID if found."""
+    key = f"imdb_lookup_{_normalize(anime_name)}"
+    cached = cache_get(key, KITSU_TTL)
+    if cached is not None:
+        return cached if cached != "" else None
+    try:
+        encoded = requests.utils.quote(anime_name)
+        r = requests.get(
+            f"https://v3-cinemeta.strem.io/catalog/series/top/search={encoded}.json",
+            timeout=10,
+        )
+        r.raise_for_status()
+        metas = r.json().get("metas", [])
+        if metas:
+            norm_name = _normalize(anime_name)
+            for m in metas:
+                if _normalize(m.get("name", "")) == norm_name:
+                    cache_set(key, m["id"])
+                    return m["id"]
+            # Fallback: use the first result
+            cache_set(key, metas[0]["id"])
+            return metas[0]["id"]
+        cache_set(key, "")
+        return None
+    except Exception:
+        return None
+
+
 def _fetch_cinemeta_meta(imdb_id: str, content_type: str) -> dict | None:
     """Get full meta from Cinemeta (cached). Returns the meta dict or None."""
     key = f"cinemeta_meta_{imdb_id}"
@@ -1163,6 +1192,12 @@ def meta(content_type: str, meta_id: str):
                     {"source": info["youtube_trailer"], "type": "Trailer"}
                 ]
 
+            # Try to find IMDB ID for richer images (background, episode thumbnails)
+            imdb_id = _find_imdb_id(info.get("name", ""))
+            if imdb_id:
+                result["background"] = f"https://images.metahub.space/background/medium/{imdb_id}/img"
+                result["logo"] = f"https://images.metahub.space/logo/medium/{imdb_id}/img"
+
             videos = []
             cover = info.get("cover", "")
             if "episodes" in data:
@@ -1175,7 +1210,9 @@ def meta(content_type: str, meta_id: str):
                             "season": _safe_int(season_num),
                             "episode": _safe_int(ep_num_raw),
                         }
-                        if cover:
+                        if imdb_id:
+                            vid["thumbnail"] = f"https://episodes.metahub.space/{imdb_id}/{season_num}/{ep_num_raw}/w780.jpg"
+                        elif cover:
                             vid["thumbnail"] = cover
                         if ep.get("added"):
                             try:
