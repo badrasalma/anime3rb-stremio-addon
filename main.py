@@ -31,6 +31,11 @@ GITHUB_DATA_URL = os.environ.get(
 # Set USE_CACHED=1 to use pre-cached data files instead of live API
 USE_CACHED = os.environ.get("USE_CACHED", "0") == "1"
 
+# TVDB API key for anime artwork (backgrounds, logos)
+TVDB_API_KEY = os.environ.get("TVDB_API_KEY", "962fd58f-6940-4666-8d0c-8d918815ffba")
+_tvdb_token: str = ""
+_tvdb_token_ts: float = 0
+
 # ─── Cloudscraper session ───
 scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"}) if cloudscraper else None
 
@@ -415,6 +420,117 @@ def _find_imdb_id(anime_name: str) -> str | None:
         return None
     except Exception:
         return None
+
+
+# ─── TVDB API ───
+def _tvdb_login() -> str:
+    """Login to TVDB and return bearer token (cached for 25 days)."""
+    global _tvdb_token, _tvdb_token_ts
+    if _tvdb_token and (time.time() - _tvdb_token_ts) < 25 * 24 * 3600:
+        return _tvdb_token
+    try:
+        r = requests.post(
+            "https://api4.thetvdb.com/v4/login",
+            json={"apikey": TVDB_API_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        _tvdb_token = r.json().get("data", {}).get("token", "")
+        _tvdb_token_ts = time.time()
+        print(f"[TVDB] Logged in successfully")
+        return _tvdb_token
+    except Exception as e:
+        print(f"[TVDB] Login error: {e}")
+        return ""
+
+
+def _tvdb_get(path: str) -> dict | None:
+    """Make an authenticated GET request to TVDB API."""
+    token = _tvdb_login()
+    if not token:
+        return None
+    try:
+        r = requests.get(
+            f"https://api4.thetvdb.com/v4/{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("data")
+    except Exception:
+        return None
+
+
+def _tvdb_search(anime_name: str) -> int | None:
+    """Search TVDB for an anime by name and return the TVDB series ID."""
+    key = f"tvdb_id_{_normalize(anime_name)}"
+    cached = cache_get(key, KITSU_TTL)
+    if cached is not None:
+        return cached if cached != 0 else None
+    try:
+        encoded = requests.utils.quote(anime_name)
+        data = _tvdb_get(f"search?query={encoded}&type=series")
+        if data:
+            norm_name = _normalize(anime_name)
+            # Exact name match
+            for r in data:
+                if _normalize(r.get("name", "")) == norm_name:
+                    tvdb_id = int(r["tvdb_id"])
+                    cache_set(key, tvdb_id)
+                    return tvdb_id
+            # Check aliases for a match
+            for r in data:
+                aliases = r.get("aliases", [])
+                if isinstance(aliases, list):
+                    for alias in aliases:
+                        alias_name = alias if isinstance(alias, str) else alias.get("name", "")
+                        if _normalize(alias_name) == norm_name:
+                            tvdb_id = int(r["tvdb_id"])
+                            cache_set(key, tvdb_id)
+                            return tvdb_id
+            # Fallback to first result
+            tvdb_id = int(data[0]["tvdb_id"])
+            cache_set(key, tvdb_id)
+            return tvdb_id
+        cache_set(key, 0)
+        return None
+    except Exception:
+        cache_set(key, 0)
+        return None
+
+
+def _tvdb_artwork(tvdb_id: int) -> dict:
+    """Get artwork URLs from TVDB for a series.
+    Returns dict with keys: poster, background, logo (or empty strings)."""
+    key = f"tvdb_art_{tvdb_id}"
+    cached = cache_get(key, KITSU_TTL)
+    if cached is not None:
+        return cached
+
+    result = {"poster": "", "background": "", "logo": ""}
+    data = _tvdb_get(f"series/{tvdb_id}/extended")
+    if not data:
+        cache_set(key, result)
+        return result
+
+    artworks = data.get("artworks", [])
+    # TVDB artwork types: 2=poster, 3=background, 23=clearlogo
+    for a in artworks:
+        url = a.get("image", "")
+        if not url:
+            continue
+        art_type = a.get("type", 0)
+        if art_type == 2 and not result["poster"]:
+            result["poster"] = url
+        elif art_type == 3 and not result["background"]:
+            result["background"] = url
+        elif art_type == 23 and not result["logo"]:
+            result["logo"] = url
+        if all(result.values()):
+            break
+
+    cache_set(key, result)
+    return result
 
 
 def _fetch_cinemeta_meta(imdb_id: str, content_type: str) -> dict | None:
@@ -1192,11 +1308,16 @@ def meta(content_type: str, meta_id: str):
                     {"source": info["youtube_trailer"], "type": "Trailer"}
                 ]
 
-            # Try to find IMDB ID for richer images (background, episode thumbnails)
-            imdb_id = _find_imdb_id(info.get("name", ""))
-            if imdb_id:
-                result["background"] = f"https://images.metahub.space/background/medium/{imdb_id}/img"
-                result["logo"] = f"https://images.metahub.space/logo/medium/{imdb_id}/img"
+            # Try TVDB for background and logo (best source for anime)
+            anime_name = info.get("name", "")
+            tvdb_id = _tvdb_search(anime_name) if anime_name else None
+            tvdb_art: dict = {}
+            if tvdb_id:
+                tvdb_art = _tvdb_artwork(tvdb_id)
+                if tvdb_art.get("background"):
+                    result["background"] = tvdb_art["background"]
+                if tvdb_art.get("logo"):
+                    result["logo"] = tvdb_art["logo"]
 
             videos = []
             cover = info.get("cover", "")
@@ -1210,9 +1331,7 @@ def meta(content_type: str, meta_id: str):
                             "season": _safe_int(season_num),
                             "episode": _safe_int(ep_num_raw),
                         }
-                        if imdb_id:
-                            vid["thumbnail"] = f"https://episodes.metahub.space/{imdb_id}/{season_num}/{ep_num_raw}/w780.jpg"
-                        elif cover:
+                        if cover:
                             vid["thumbnail"] = cover
                         if ep.get("added"):
                             try:
