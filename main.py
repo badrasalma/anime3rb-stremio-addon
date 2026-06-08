@@ -334,9 +334,12 @@ MANIFEST = {
                 {"name": "skip", "isRequired": False},
                 {"name": "genre", "isRequired": False},
             ],
-            "genres": ["أكشن", "كوميدي", "خيال", "شونين", "مغامرة", "دراما",
-                       "خيال علمي", "سينين", "خارق للطبيعة", "غموض",
-                       "إيسيكاي", "رياضي", "تاريخي", "ميكا"],
+            "genres": [
+                "أكشن", "كوميدي", "خيال", "شونين", "مغامرة", "دراما",
+                "خيال علمي", "سينين", "خارق للطبيعة", "غموض", "إيسيكاي",
+                "رياضي", "تاريخي", "ميكا", "رومانسي", "مدرسي", "قوى خارقة",
+                "نفسي", "تشويق", "رعب", "عسكري",
+            ],
         },
         {
             "type": "series",
@@ -687,12 +690,9 @@ def _background_refresh() -> None:
 
 
 def load_genres() -> None:
-    try:
-        cats = get_series_categories()
-        if isinstance(cats, list):
-            MANIFEST["catalogs"][0]["genres"] = [c["category_name"] for c in cats]
-    except Exception as e:
-        print(f"[Genres] Error: {e}")
+    # Genres are hardcoded in MANIFEST (curated list of useful genres)
+    # Don't overwrite with API categories (those are type categories, not genres)
+    pass
 
 
 # ─── FastAPI App ───
