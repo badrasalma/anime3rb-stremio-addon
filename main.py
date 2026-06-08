@@ -376,8 +376,9 @@ def _match_all_words(words: list[str], *fields: str) -> bool:
     return all(w in combined for w in words)
 
 
-# Common English → romaji name aliases for better search
+# Common English/Arabic → romaji name aliases for better search
 _SEARCH_ALIASES: dict[str, list[str]] = {
+    # English aliases
     "seven deadly sins": ["nanatsu no taizai"],
     "attack on titan": ["shingeki no kyojin"],
     "demon slayer": ["kimetsu no yaiba"],
@@ -415,6 +416,32 @@ _SEARCH_ALIASES: dict[str, list[str]] = {
     "overlord": ["overlord"],
     "no game no life": ["no game no life"],
     "steins gate": ["steins;gate", "steins gate"],
+    # Arabic aliases
+    "الخطايا السبع": ["nanatsu no taizai"],
+    "الخطايا السبع المميتة": ["nanatsu no taizai"],
+    "هجوم العمالقة": ["shingeki no kyojin"],
+    "قاتل الشياطين": ["kimetsu no yaiba"],
+    "بطلي الأكاديمي": ["boku no hero academia"],
+    "القناص": ["hunter x hunter"],
+    "ون بيس": ["one piece"],
+    "ناروتو": ["naruto"],
+    "بليتش": ["bleach"],
+    "المحقق كونان": ["meitantei conan"],
+    "كونان": ["meitantei conan"],
+    "دراغون بول": ["dragon ball"],
+    "مذكرة الموت": ["death note"],
+    "طوكيو غول": ["tokyo ghoul"],
+    "جوجوتسو كايسن": ["jujutsu kaisen"],
+    "البرسيم الأسود": ["black clover"],
+    "ذيل الجنية": ["fairy tail"],
+    "سورد ارت": ["sword art online"],
+    "الكيميائي المعدني": ["fullmetal alchemist", "hagane no renkinjutsushi"],
+    "بلو لوك": ["blue lock"],
+    "فينلاند ساغا": ["vinland saga"],
+    "بطل الدرع": ["tate no yuusha no nariagari"],
+    "موشوكو تنسي": ["mushoku tensei"],
+    "صعود المستوى": ["ore dake level up"],
+    "برج الإله": ["kami no tou"],
 }
 
 
