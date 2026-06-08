@@ -1,6 +1,9 @@
-"""Fetch all series data from anime3rb and save as cached JSON files.
+"""Fetch series data from anime3rb and save as cached JSON files.
 
-Uses a single cloudscraper session with smart retry and rate limiting.
+Modes:
+  full   - Fetch everything (initial setup)
+  update - Re-fetch series/vod lists + refresh episodes for all cached series
+           that have new episodes on the server (daily cron)
 """
 import json
 import os
@@ -16,7 +19,6 @@ PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
 
 def make_scraper():
     s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
-    # Warm up: solve Cloudflare challenge first
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
     for attempt in range(3):
         try:
@@ -38,104 +40,76 @@ def api_get(scraper, action, extra="", timeout=30):
     return r.json()
 
 
-def main():
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    os.makedirs(data_dir, exist_ok=True)
+def _slim_series(raw_list):
+    return [{
+        "series_id": s.get("series_id"), "name": s.get("name", ""),
+        "cover": s.get("cover", ""), "plot": (s.get("plot", "") or "")[:500],
+        "genre": s.get("genre", ""), "category_id": s.get("category_id"),
+        "rating": s.get("rating", ""), "releaseDate": s.get("releaseDate", ""),
+    } for s in raw_list]
 
-    print("Initializing scraper...")
-    scraper = make_scraper()
 
-    # 1. Fetch series list (if not exists)
-    sl_path = os.path.join(data_dir, "series_list.json")
-    if not os.path.exists(sl_path):
-        print("Fetching series list...")
-        series_list = api_get(scraper, "get_series", timeout=60)
-        print(f"  Got {len(series_list)} series")
-        series_slim = [{
-            "series_id": s.get("series_id"), "name": s.get("name", ""),
-            "cover": s.get("cover", ""), "plot": (s.get("plot", "") or "")[:500],
-            "genre": s.get("genre", ""), "category_id": s.get("category_id"),
-            "rating": s.get("rating", ""), "releaseDate": s.get("releaseDate", ""),
-        } for s in series_list]
-        with open(sl_path, "w") as f:
-            json.dump(series_slim, f, ensure_ascii=False, separators=(",", ":"))
-    else:
-        with open(sl_path) as f:
-            series_slim = json.load(f)
-        print(f"Loaded {len(series_slim)} series from cache")
+def _slim_vod(raw_list):
+    return [{
+        "stream_id": v.get("stream_id"), "name": v.get("name", ""),
+        "cover": v.get("cover", ""), "stream_icon": v.get("stream_icon", ""),
+        "plot": (v.get("plot", "") or "")[:500], "genre": v.get("genre", ""),
+        "category_id": v.get("category_id"), "rating": v.get("rating", ""),
+        "releaseDate": v.get("releaseDate", ""),
+        "container_extension": v.get("container_extension", "mp4"),
+    } for v in raw_list]
 
-    # 2. Categories
-    cat_path = os.path.join(data_dir, "categories.json")
-    if not os.path.exists(cat_path):
-        print("Fetching categories...")
-        cats = api_get(scraper, "get_series_categories")
-        with open(cat_path, "w") as f:
-            json.dump(cats, f, ensure_ascii=False, separators=(",", ":"))
 
-    # 3. VOD
-    vod_path = os.path.join(data_dir, "vod_list.json")
-    if not os.path.exists(vod_path):
-        print("Fetching VOD list...")
-        vod_list = api_get(scraper, "get_vod_streams", timeout=60)
-        vod_slim = [{
-            "stream_id": v.get("stream_id"), "name": v.get("name", ""),
-            "cover": v.get("cover", ""), "stream_icon": v.get("stream_icon", ""),
-            "plot": (v.get("plot", "") or "")[:500], "genre": v.get("genre", ""),
-            "category_id": v.get("category_id"), "rating": v.get("rating", ""),
-            "releaseDate": v.get("releaseDate", ""),
-            "container_extension": v.get("container_extension", "mp4"),
-        } for v in vod_list]
-        with open(vod_path, "w") as f:
-            json.dump(vod_slim, f, ensure_ascii=False, separators=(",", ":"))
+def _parse_episodes(data):
+    """Convert API response to compact cached format."""
+    info = data.get("info", {})
+    episodes = {}
+    for season, eps in data.get("episodes", {}).items():
+        episodes[season] = [{
+            "e": ep.get("episode_num"),
+            "s": ep.get("stream_id"),
+            "x": ep.get("container_extension", "mp4"),
+            "t": ep.get("title", ""),
+        } for ep in eps]
+    return {
+        "name": info.get("name", ""),
+        "cover": info.get("cover", ""),
+        "plot": (info.get("plot", "") or "")[:200],
+        "genre": info.get("genre", ""),
+        "rating": info.get("rating", ""),
+        "releaseDate": info.get("releaseDate", ""),
+        "episodes": episodes,
+    }
 
-    # 4. Episode data - fetch with smart retry
+
+def _ep_count(entry):
+    return sum(len(eps) for eps in entry.get("episodes", {}).values())
+
+
+def _fetch_episodes(scraper, all_info, series_ids, data_dir):
+    """Fetch episode data for a list of series IDs."""
     episodes_path = os.path.join(data_dir, "episodes.json")
-    all_info = {}
-    if os.path.exists(episodes_path):
-        with open(episodes_path) as f:
-            all_info = json.load(f)
-
-    series_ids = [str(s["series_id"]) for s in series_slim]
-    remaining = [sid for sid in series_ids if sid not in all_info]
-    print(f"Episodes: {len(all_info)} cached, {len(remaining)} remaining")
-
-    if not remaining:
-        print("All episodes cached!")
-        return
-
     consecutive_fails = 0
     done = 0
+    updated = 0
 
-    for sid in remaining:
+    for sid in series_ids:
         try:
             data = api_get(scraper, "get_series_info", f"&series_id={sid}")
             if data and "episodes" in data:
-                info = data.get("info", {})
-                episodes = {}
-                for season, eps in data["episodes"].items():
-                    episodes[season] = [{
-                        "e": ep.get("episode_num"),
-                        "s": ep.get("stream_id"),
-                        "x": ep.get("container_extension", "mp4"),
-                        "t": ep.get("title", ""),
-                    } for ep in eps]
-                all_info[sid] = {
-                    "name": info.get("name", ""),
-                    "cover": info.get("cover", ""),
-                    "plot": (info.get("plot", "") or "")[:500],
-                    "genre": info.get("genre", ""),
-                    "rating": info.get("rating", ""),
-                    "releaseDate": info.get("releaseDate", ""),
-                    "episodes": episodes,
-                }
+                parsed = _parse_episodes(data)
+                new_count = _ep_count(parsed)
+                old_count = _ep_count(all_info.get(sid, {}))
+                if new_count != old_count:
+                    all_info[sid] = parsed
+                    updated += 1
                 consecutive_fails = 0
             else:
                 consecutive_fails += 1
-        except Exception as e:
+        except Exception:
             consecutive_fails += 1
             if consecutive_fails >= 5:
-                print(f"  {len(all_info)} cached. Re-initializing scraper after {consecutive_fails} fails...")
-                # Save progress
+                print(f"  Re-initializing scraper after {consecutive_fails} fails...")
                 with open(episodes_path, "w") as f:
                     json.dump(all_info, f, ensure_ascii=False, separators=(",", ":"))
                 time.sleep(30)
@@ -145,17 +119,82 @@ def main():
 
         done += 1
         if done % 25 == 0:
-            print(f"  Progress: {done}/{len(remaining)} (total cached: {len(all_info)})")
+            print(f"  Progress: {done}/{len(series_ids)} (updated: {updated})")
             with open(episodes_path, "w") as f:
                 json.dump(all_info, f, ensure_ascii=False, separators=(",", ":"))
 
-        # Rate limiting: 1 request every 2 seconds
         time.sleep(2)
 
     # Final save
     with open(episodes_path, "w") as f:
         json.dump(all_info, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"Done! Total cached: {len(all_info)} series")
+    return updated
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    print(f"Mode: {mode}")
+    print("Initializing scraper...")
+    scraper = make_scraper()
+
+    sl_path = os.path.join(data_dir, "series_list.json")
+    cat_path = os.path.join(data_dir, "categories.json")
+    vod_path = os.path.join(data_dir, "vod_list.json")
+    episodes_path = os.path.join(data_dir, "episodes.json")
+
+    # ── Always refresh series list, categories, VOD in update mode ──
+    if mode == "update" or not os.path.exists(sl_path):
+        print("Fetching series list...")
+        raw = api_get(scraper, "get_series", timeout=60)
+        series_slim = _slim_series(raw)
+        print(f"  Got {len(series_slim)} series")
+        with open(sl_path, "w") as f:
+            json.dump(series_slim, f, ensure_ascii=False, separators=(",", ":"))
+        time.sleep(2)
+    else:
+        with open(sl_path) as f:
+            series_slim = json.load(f)
+        print(f"Loaded {len(series_slim)} series from cache")
+
+    if mode == "update" or not os.path.exists(cat_path):
+        print("Fetching categories...")
+        cats = api_get(scraper, "get_series_categories")
+        with open(cat_path, "w") as f:
+            json.dump(cats, f, ensure_ascii=False, separators=(",", ":"))
+        time.sleep(2)
+
+    if mode == "update" or not os.path.exists(vod_path):
+        print("Fetching VOD list...")
+        vod_list = api_get(scraper, "get_vod_streams", timeout=60)
+        with open(vod_path, "w") as f:
+            json.dump(_slim_vod(vod_list), f, ensure_ascii=False, separators=(",", ":"))
+        time.sleep(2)
+
+    # ── Episode data ──
+    all_info = {}
+    if os.path.exists(episodes_path):
+        with open(episodes_path) as f:
+            all_info = json.load(f)
+
+    all_ids = [str(s["series_id"]) for s in series_slim]
+
+    if mode == "update":
+        # Re-fetch ALL series to catch new episodes everywhere
+        print(f"Refreshing all {len(all_ids)} series for new episodes...")
+        updated = _fetch_episodes(scraper, all_info, all_ids, data_dir)
+        print(f"Done! Updated {updated} series with new episodes (total: {len(all_info)})")
+    else:
+        # Full mode: only fetch uncached series
+        remaining = [sid for sid in all_ids if sid not in all_info]
+        print(f"Episodes: {len(all_info)} cached, {len(remaining)} remaining")
+        if not remaining:
+            print("All episodes cached!")
+            return
+        updated = _fetch_episodes(scraper, all_info, remaining, data_dir)
+        print(f"Done! Total cached: {len(all_info)} series")
 
 
 if __name__ == "__main__":
