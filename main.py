@@ -565,6 +565,165 @@ def _find_series_by_name(titles: list[str]) -> dict | None:
     return _best_match(titles, all_series)
 
 
+# Regex to extract the core franchise name by stripping season/part suffixes.
+_SEASON_SUFFIX = re.compile(
+    r'\s*(?:'
+    r'(?:\d+(?:st|nd|rd|th)\s+season)'  # "2nd Season", "3rd Season"
+    r'|(?:season\s+\d+)'  # "Season 2"
+    r'|(?:(?:the\s+)?final\s+season)'  # "The Final Season"
+    r'|(?:kanketsu[- ]?hen)'  # "Kanketsu-hen"
+    r')'
+    r'(?:\s*(?:part\s*\d+|[:\-–—]\s*\S+.*))?'  # optional part/subtitle after season
+    r'\s*$',
+    re.IGNORECASE,
+)
+
+
+def _extract_franchise_core(name: str) -> str:
+    """Get the core franchise name, stripping season/part indicators."""
+    core = _SEASON_SUFFIX.sub('', name).strip()
+    core = re.sub(r'[:\-–—]+\s*$', '', core).strip()
+    return _normalize(core)
+
+
+def _extract_season_number(name: str, core: str) -> int | None:
+    """Determine which season this entry represents.
+    Returns an int season number, or None if it's not a main season entry."""
+    norm_name = name.strip()
+    norm_core_raw = _extract_franchise_core(name)
+
+    # Must share the same franchise core
+    if norm_core_raw != core:
+        return None
+
+    suffix = norm_name[len(re.sub(_SEASON_SUFFIX, '', norm_name)):].strip() if norm_name != re.sub(_SEASON_SUFFIX, '', norm_name) else ''
+    # Exact core name (no suffix) = season 1
+    if _normalize(norm_name) == core:
+        return 1
+
+    # "Nth Season"
+    m = re.search(r'(\d+)(?:st|nd|rd|th)\s+season', name, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'season\s+(\d+)', name, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # "The Final Season" variants - assign a high number; we'll fix the order later
+    if re.search(r'(?:the\s+)?final\s+season|kanketsu', name, re.IGNORECASE):
+        return 900  # placeholder high number
+
+    return None  # not a main season entry (OVA, special, etc.)
+
+
+_NOISE_WORDS = re.compile(
+    r'\b(?:ova|specials?|picture\s*drama|recaps?|movie|film|joshou|'
+    r'tokubetsu|kikaku|episode\s+of|fan\s*letter|prologue|3d2y)\b',
+    re.IGNORECASE,
+)
+
+# Minimum episodes for a subtitle-based entry to be considered a real season.
+# Real anime seasons typically have 10-25 episodes; anything below 10 is
+# likely a special, OVA compilation, or bridging mini-series.
+_MIN_SEASON_EPISODES = 10
+
+
+def _colon_prefix(name: str) -> str:
+    """Get the text before the first colon, normalized."""
+    return _normalize(name.split(':')[0].strip())
+
+
+def _cached_episode_count(series_id) -> int:
+    """Get the cached episode count for a series, 0 if not cached."""
+    data = get_series_info(str(series_id))
+    if not data or 'episodes' not in data:
+        return 0
+    return sum(len(eps) for eps in data['episodes'].values())
+
+
+def _find_franchise_seasons(base_match: dict) -> list[dict]:
+    """Find all main-season entries for the franchise, sorted by season number/release date.
+    Uses two strategies:
+    1. Entries with explicit season indicators (Nth Season, Season N, Final Season)
+    2. For subtitle-based seasons (e.g. 'Nanatsu no Taizai: Imashime no Fukkatsu'),
+       falls back to matching entries that share the same colon-prefix."""
+    core = _extract_franchise_core(base_match.get('name', ''))
+    if not core:
+        return [base_match]
+    all_series = get_all_series()
+    if not isinstance(all_series, list):
+        return [base_match]
+
+    # Strategy A: explicit season indicators
+    seasons: list[tuple[int, str, dict]] = []
+    for s in all_series:
+        name = s.get('name', '')
+        sn = _extract_season_number(name, core)
+        if sn is not None:
+            seasons.append((sn, s.get('releaseDate', '9999') or '9999', s))
+
+    if len(seasons) >= 2:
+        seasons.sort(key=lambda t: (t[0], t[1]))
+        return [entry for _sn, _rd, entry in seasons]
+
+    # Strategy B: colon-prefix matching for subtitle-based seasons
+    # e.g. "Nanatsu no Taizai" / "Nanatsu no Taizai: Imashime no Fukkatsu"
+    prefix = _colon_prefix(base_match.get('name', ''))
+    if not prefix:
+        return [base_match] if not seasons else [seasons[0][2]]
+
+    subtitle_entries: list[tuple[str, dict]] = []
+    for s in all_series:
+        name = s.get('name', '')
+        if _NOISE_WORDS.search(name):
+            continue
+        cp = _colon_prefix(name)
+        if cp == prefix:
+            ec = _cached_episode_count(s.get('series_id'))
+            # Filter out entries with very few episodes (specials/OVAs)
+            if ec >= _MIN_SEASON_EPISODES or _normalize(name) == core:
+                subtitle_entries.append((s.get('releaseDate', '9999') or '9999', s))
+
+    if len(subtitle_entries) >= 2:
+        subtitle_entries.sort(key=lambda t: t[0])
+        return [entry for _rd, entry in subtitle_entries]
+
+    return [base_match] if not seasons else [seasons[0][2]]
+
+
+def _resolve_franchise_episode(
+    franchise: list[dict], absolute_ep: int
+) -> tuple[dict | None, int]:
+    """Given a sorted franchise list and an absolute episode number,
+    find which series entry and local episode number it maps to."""
+    running = 0
+    for entry in franchise:
+        sid = str(entry['series_id'])
+        data = get_series_info(sid)
+        if not data or 'episodes' not in data:
+            continue
+        total = sum(len(eps) for eps in data['episodes'].values())
+        if total == 0:
+            continue
+        if running + total >= absolute_ep:
+            local_ep = absolute_ep - running
+            return entry, local_ep
+        running += total
+    return None, absolute_ep
+
+
+def _find_entry_for_season(
+    franchise: list[dict], season: int
+) -> dict | None:
+    """Pick the Nth main series entry from the franchise (1-based).
+    For franchises with 'Part 2' entries, this maps by position."""
+    if season <= 0:
+        season = 1
+    if season <= len(franchise):
+        return franchise[season - 1]
+    return None
+
+
 def _find_vod_by_name(titles: list[str]) -> dict | None:
     """Find the best matching anime3rb VOD (movie) for the given title list."""
     try:
@@ -576,8 +735,44 @@ def _find_vod_by_name(titles: list[str]) -> dict | None:
     return _best_match(titles, all_vod)
 
 
+def _find_episode_in_series(series_entry: dict, ep_num: int) -> tuple[dict | None, dict | None]:
+    """Look up episode *ep_num* inside a single series entry.
+    Returns (series_info_data, episode_dict) or (None, None)."""
+    sid = str(series_entry['series_id'])
+    try:
+        data = get_series_info(sid)
+    except Exception as e:
+        print(f"[Stream] Error getting series info {sid}: {e}")
+        return None, None
+    if not data or 'episodes' not in data:
+        return data, None
+    for _season_num, episodes in data['episodes'].items():
+        for ep in episodes:
+            if _safe_int(ep.get('episode_num')) == ep_num:
+                return data, ep
+    return data, None
+
+
+def _build_stream_result(series_name: str, ep: dict, ep_num: int) -> list[dict]:
+    """Build the Stremio stream response for a matched episode."""
+    ext = ep.get('container_extension', 'mp4')
+    stream_url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{ep['stream_id']}.{ext}"
+    return [
+        {
+            "url": stream_url,
+            "title": f"{series_name}\n{ep.get('title', f'Episode {ep_num}')}",
+            "name": "Anime3rb",
+            "behaviorHints": {"notWebReady": True},
+        }
+    ]
+
+
 def _stream_for_external_series(stream_id: str) -> list[dict]:
     """Resolve stream for an external series episode ID (kitsu:ID:ep or tt...:S:E)."""
+    use_season_mapping = False  # True for IMDB multi-season lookups
+    season = 1
+    raw_ep = 0
+
     if stream_id.startswith("kitsu:"):
         parts = stream_id.split(":")
         if len(parts) < 3:
@@ -603,8 +798,9 @@ def _stream_for_external_series(stream_id: str) -> list[dict]:
                 return []
         season = _safe_int(parts[1]) if len(parts) >= 2 else 1
         raw_ep = _safe_int(parts[2]) if len(parts) >= 3 else 0
-        ep_num = _cinemeta_absolute_ep(imdb_id, season, raw_ep)
-        print(f"[Stream] IMDB {imdb_id} s{season}e{raw_ep} → absolute ep {ep_num}")
+        ep_num = raw_ep  # start with within-season episode number
+        use_season_mapping = True
+        print(f"[Stream] IMDB {imdb_id} s{season}e{raw_ep}")
         titles = _fetch_cinemeta_name(imdb_id, "series")
     else:
         return []
@@ -616,30 +812,64 @@ def _stream_for_external_series(stream_id: str) -> list[dict]:
     if not match:
         return []
 
-    series_id = str(match["series_id"])
-    try:
-        data = get_series_info(series_id)
-    except Exception as e:
-        print(f"[Stream] Error getting series info {series_id}: {e}")
-        return []
+    # ── Strategy 1: IMDB season mapping ──
+    # anime3rb often splits seasons into separate series entries.
+    # Use the season number to pick the right entry directly.
+    if use_season_mapping and season >= 1:
+        franchise = _find_franchise_seasons(match)
+        print(f"[Stream] Franchise has {len(franchise)} season entries")
+        target_entry = _find_entry_for_season(franchise, season)
+        if target_entry:
+            _data, ep = _find_episode_in_series(target_entry, raw_ep)
+            if ep:
+                print(f"[Stream] Matched via season mapping: {target_entry.get('name')} ep {raw_ep}")
+                return _build_stream_result(target_entry.get('name', 'Anime3rb'), ep, raw_ep)
 
-    if not data or "episodes" not in data:
-        return []
+        # Fallback: try absolute episode mapping across the franchise
+        absolute_ep = _cinemeta_absolute_ep(
+            parts[0], season, raw_ep  # type: ignore[possibly-undefined]
+        )
+        print(f"[Stream] Season mapping failed, trying absolute ep {absolute_ep}")
 
-    # Find the episode by number across all seasons
-    for season_num, episodes in data["episodes"].items():
-        for ep in episodes:
-            if _safe_int(ep.get("episode_num")) == ep_num:
-                ext = ep.get("container_extension", "mp4")
-                stream_url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{ep['stream_id']}.{ext}"
-                return [
-                    {
-                        "url": stream_url,
-                        "title": f"{match.get('name', 'Anime3rb')}\n{ep.get('title', f'Episode {ep_num}')}",
-                        "name": "Anime3rb",
-                        "behaviorHints": {"notWebReady": True},
-                    }
-                ]
+        # First try: use absolute_ep as direct episode number in franchise entries.
+        # This works for long-running series (One Piece, Conan) where episode
+        # numbers in anime3rb match Cinemeta's absolute count even if there
+        # are numbering gaps.
+        for entry in franchise:
+            _data, ep = _find_episode_in_series(entry, absolute_ep)
+            if ep:
+                print(f"[Stream] Matched via direct ep lookup: {entry.get('name')} ep {absolute_ep}")
+                return _build_stream_result(entry.get('name', 'Anime3rb'), ep, absolute_ep)
+
+        # Second try: sequential walk through franchise entries
+        resolved_entry, local_ep = _resolve_franchise_episode(franchise, absolute_ep)
+        if resolved_entry:
+            _data, ep = _find_episode_in_series(resolved_entry, local_ep)
+            if ep:
+                print(f"[Stream] Matched via absolute mapping: {resolved_entry.get('name')} ep {local_ep}")
+                return _build_stream_result(resolved_entry.get('name', 'Anime3rb'), ep, local_ep)
+
+    # ── Strategy 2: Direct lookup (Kitsu/MAL or single-season IMDB) ──
+    # Skip for multi-season IMDB: raw_ep is within-season and would match
+    # the wrong season in the base entry.
+    if not use_season_mapping or season <= 1:
+        _data, ep = _find_episode_in_series(match, ep_num)
+        if ep:
+            return _build_stream_result(match.get('name', 'Anime3rb'), ep, ep_num)
+
+    # ── Strategy 3: Franchise fallback for Kitsu/MAL ──
+    # If the primary match didn't have the episode, try related entries.
+    if not use_season_mapping:
+        franchise = _find_franchise_seasons(match)
+        if len(franchise) > 1:
+            for entry in franchise:
+                if str(entry.get('series_id')) == str(match.get('series_id')):
+                    continue  # already tried
+                _data, ep = _find_episode_in_series(entry, ep_num)
+                if ep:
+                    print(f"[Stream] Matched via franchise fallback: {entry.get('name')} ep {ep_num}")
+                    return _build_stream_result(entry.get('name', 'Anime3rb'), ep, ep_num)
+
     return []
 
 
