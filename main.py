@@ -324,7 +324,25 @@ MANIFEST = {
                 {"name": "skip", "isRequired": False},
                 {"name": "genre", "isRequired": False},
             ],
-            "genres": [],
+            "genres": ["أكشن", "كوميدي", "خيال", "شونين", "مغامرة", "دراما",
+                       "خيال علمي", "سينين", "خارق للطبيعة", "غموض",
+                       "إيسيكاي", "رياضي", "تاريخي", "ميكا"],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_new",
+            "name": "أنمي - جديد",
+            "extra": [
+                {"name": "skip", "isRequired": False},
+            ],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_popular",
+            "name": "أنمي - الأكثر شعبية",
+            "extra": [
+                {"name": "skip", "isRequired": False},
+            ],
         },
         {
             "type": "movie",
@@ -356,6 +374,99 @@ def _match_all_words(words: list[str], *fields: str) -> bool:
     """Return True if every word appears in at least one of the fields."""
     combined = " ".join(f.lower() for f in fields if f)
     return all(w in combined for w in words)
+
+
+# Common English → romaji name aliases for better search
+_SEARCH_ALIASES: dict[str, list[str]] = {
+    "seven deadly sins": ["nanatsu no taizai"],
+    "attack on titan": ["shingeki no kyojin"],
+    "demon slayer": ["kimetsu no yaiba"],
+    "my hero academia": ["boku no hero academia"],
+    "hunter x hunter": ["hunter x hunter"],
+    "one punch man": ["one punch man"],
+    "sword art online": ["sword art online"],
+    "black clover": ["black clover"],
+    "tokyo ghoul": ["tokyo ghoul"],
+    "death note": ["death note"],
+    "fullmetal alchemist": ["fullmetal alchemist", "hagane no renkinjutsushi"],
+    "detective conan": ["meitantei conan"],
+    "case closed": ["meitantei conan"],
+    "dragon ball": ["dragon ball"],
+    "fairy tail": ["fairy tail"],
+    "bleach": ["bleach"],
+    "naruto": ["naruto"],
+    "jujutsu kaisen": ["jujutsu kaisen"],
+    "spy x family": ["spy x family"],
+    "chainsaw man": ["chainsaw man"],
+    "one piece": ["one piece"],
+    "blue lock": ["blue lock"],
+    "vinland saga": ["vinland saga"],
+    "the rising of the shield hero": ["tate no yuusha no nariagari"],
+    "shield hero": ["tate no yuusha no nariagari"],
+    "re zero": ["re:zero", "rezero"],
+    "konosuba": ["kono subarashii"],
+    "classroom of the elite": ["youkoso jitsuryoku"],
+    "that time i got reincarnated as a slime": ["tensei shitara slime datta ken"],
+    "mushoku tensei": ["mushoku tensei"],
+    "solo leveling": ["ore dake level up"],
+    "mob psycho": ["mob psycho"],
+    "tower of god": ["kami no tou"],
+    "the beginning after the end": ["the beginning after the end"],
+    "overlord": ["overlord"],
+    "no game no life": ["no game no life"],
+    "steins gate": ["steins;gate", "steins gate"],
+}
+
+
+def _expand_search(query: str) -> list[str]:
+    """Expand a search query with aliases. Returns list of queries to try."""
+    queries = [query]
+    q_lower = query.lower().strip()
+    for eng, aliases in _SEARCH_ALIASES.items():
+        if eng in q_lower or q_lower in eng:
+            queries.extend(aliases)
+    return queries
+
+
+def _search_score(query: str, name: str, plot: str) -> float:
+    """Score how well a query matches a series/movie. Higher = better match.
+    Returns 0 if no match at all."""
+    q = query.lower().strip()
+    name_lower = name.lower()
+    plot_lower = plot.lower() if plot else ""
+
+    # Exact name match
+    if q == name_lower:
+        return 100.0
+    # Query is contained in name
+    if q in name_lower:
+        return 90.0
+    # Name starts with query
+    if name_lower.startswith(q):
+        return 85.0
+
+    # All words match in name
+    words = q.split()
+    if words and all(w in name_lower for w in words):
+        return 80.0
+
+    # All words match in name + plot
+    combined = name_lower + " " + plot_lower
+    if words and all(w in combined for w in words):
+        return 60.0
+
+    # Partial word match (at least 50% of words match in name)
+    if len(words) >= 2:
+        hits = sum(1 for w in words if w in name_lower)
+        ratio = hits / len(words)
+        if ratio >= 0.5:
+            return 40.0 * ratio
+
+    # Single word partial match in name
+    if len(words) == 1 and len(q) >= 3 and q in name_lower:
+        return 50.0
+
+    return 0.0
 
 
 # Cache TTL for TVDB and other lookups (24 hours)
@@ -609,25 +720,24 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
                 return stremio_response({"metas": []})
 
             if extras.get("search"):
-                q = unquote(extras["search"]).lower()
-                words = q.split()
-                series = [
-                    s
-                    for s in series
-                    if _match_all_words(words, s.get("name", ""), s.get("plot", ""))
-                ]
+                raw_q = unquote(extras["search"])
+                queries = _expand_search(raw_q)
+                scored: dict[str, tuple[float, dict]] = {}
+                for q in queries:
+                    for s in series:
+                        sid = str(s.get("series_id", ""))
+                        score = _search_score(q, s.get("name", ""), s.get("plot", ""))
+                        if score > 0 and (sid not in scored or score > scored[sid][0]):
+                            scored[sid] = (score, s)
+                ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)
+                series = [s for _, s in ranked]
 
             if extras.get("genre"):
-                cats = get_series_categories()
-                cat = next(
-                    (c for c in cats if c["category_name"] == extras["genre"]), None
-                )
-                if cat:
-                    series = [
-                        s
-                        for s in series
-                        if str(s.get("category_id")) == str(cat["category_id"])
-                    ]
+                genre_filter = unquote(extras["genre"])
+                series = [
+                    s for s in series
+                    if genre_filter in [g.strip() for g in (s.get("genre") or "").split(",")]
+                ]
 
             skip = int(extras.get("skip", 0))
             page = series[skip : skip + 100]
@@ -654,19 +764,89 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
 
             return stremio_response({"metas": metas})
 
+        if content_type == "series" and catalog_id == "anime3rb_new":
+            series = get_all_series()
+            if not isinstance(series, list):
+                return stremio_response({"metas": []})
+            # Sort by release date (newest first)
+            series = sorted(
+                [s for s in series if s.get("releaseDate")],
+                key=lambda s: s.get("releaseDate", ""),
+                reverse=True,
+            )
+            skip = int(extras.get("skip", 0))
+            page = series[skip : skip + 100]
+            metas = []
+            for s in page:
+                meta = {
+                    "id": f"anime3rb_series_{s['series_id']}",
+                    "type": "series",
+                    "name": s.get("name", ""),
+                    "posterShape": "poster",
+                }
+                if s.get("cover"):
+                    meta["poster"] = s["cover"]
+                if s.get("plot"):
+                    meta["description"] = s["plot"]
+                if s.get("genre"):
+                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
+                if s.get("releaseDate"):
+                    meta["releaseInfo"] = s["releaseDate"][:4]
+                if s.get("rating"):
+                    meta["imdbRating"] = s["rating"]
+                metas.append(meta)
+            return stremio_response({"metas": metas})
+
+        if content_type == "series" and catalog_id == "anime3rb_popular":
+            series = get_all_series()
+            if not isinstance(series, list):
+                return stremio_response({"metas": []})
+            # Sort by rating (highest first)
+            series = sorted(
+                [s for s in series if s.get("rating")],
+                key=lambda s: float(s.get("rating", 0) or 0),
+                reverse=True,
+            )
+            skip = int(extras.get("skip", 0))
+            page = series[skip : skip + 100]
+            metas = []
+            for s in page:
+                meta = {
+                    "id": f"anime3rb_series_{s['series_id']}",
+                    "type": "series",
+                    "name": s.get("name", ""),
+                    "posterShape": "poster",
+                }
+                if s.get("cover"):
+                    meta["poster"] = s["cover"]
+                if s.get("plot"):
+                    meta["description"] = s["plot"]
+                if s.get("genre"):
+                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
+                if s.get("releaseDate"):
+                    meta["releaseInfo"] = s["releaseDate"][:4]
+                if s.get("rating"):
+                    meta["imdbRating"] = s["rating"]
+                metas.append(meta)
+            return stremio_response({"metas": metas})
+
         if content_type == "movie" and catalog_id == "anime3rb_movies":
             vod = get_all_vod()
             if not isinstance(vod, list):
                 return stremio_response({"metas": []})
 
             if extras.get("search"):
-                q = unquote(extras["search"]).lower()
-                words = q.split()
-                vod = [
-                    v
-                    for v in vod
-                    if _match_all_words(words, v.get("name", ""), v.get("plot", ""))
-                ]
+                raw_q = unquote(extras["search"])
+                queries = _expand_search(raw_q)
+                vod_scored: dict[str, tuple[float, dict]] = {}
+                for q in queries:
+                    for v in vod:
+                        vid = str(v.get("stream_id", ""))
+                        score = _search_score(q, v.get("name", ""), v.get("plot", ""))
+                        if score > 0 and (vid not in vod_scored or score > vod_scored[vid][0]):
+                            vod_scored[vid] = (score, v)
+                ranked = sorted(vod_scored.values(), key=lambda x: x[0], reverse=True)
+                vod = [v for _, v in ranked]
 
             skip = int(extras.get("skip", 0))
             page = vod[skip : skip + 100]
@@ -789,10 +969,11 @@ def meta(content_type: str, meta_id: str):
             if not info:
                 return stremio_response({"meta": None})
 
+            movie_name = info.get("name") or info.get("movie_name", "")
             result = {
                 "id": meta_id,
                 "type": "movie",
-                "name": info.get("name") or info.get("movie_name", ""),
+                "name": movie_name,
                 "posterShape": "poster",
             }
             poster = (
@@ -811,6 +992,16 @@ def meta(content_type: str, meta_id: str):
                 result["releaseInfo"] = info["releaseDate"][:4]
             if info.get("rating"):
                 result["imdbRating"] = info["rating"]
+
+            # Enrich with TVDB artwork (background + logo)
+            if movie_name:
+                tvdb_id = _tvdb_search(movie_name)
+                if tvdb_id:
+                    tvdb_art = _tvdb_artwork(tvdb_id)
+                    if tvdb_art.get("background"):
+                        result["background"] = tvdb_art["background"]
+                    if tvdb_art.get("logo"):
+                        result["logo"] = tvdb_art["logo"]
 
             return stremio_response({"meta": result})
 
