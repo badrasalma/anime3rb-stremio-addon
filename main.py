@@ -95,6 +95,7 @@ def cache_set(key: str, val: Any) -> None:
 _cached_episodes: dict = {}  # series_id -> episode data (loaded from GitHub)
 _cached_data_ts: float = 0  # timestamp of last data reload
 CACHED_DATA_TTL = 6 * 60 * 60  # Reload cached data every 6 hours
+_english_names: dict[str, str] = {}  # series_id -> English display name
 
 
 def _load_github_json(filename: str) -> Any:
@@ -121,7 +122,7 @@ def _load_local_json(filename: str) -> Any:
 
 def _load_cached_data() -> None:
     """Load pre-cached data from GitHub or local files."""
-    global _cached_episodes, _cached_data_ts
+    global _cached_episodes, _cached_data_ts, _english_names
     if time.time() - _cached_data_ts < CACHED_DATA_TTL and _cached_episodes:
         return  # Already loaded and fresh
 
@@ -133,8 +134,17 @@ def _load_cached_data() -> None:
             _cached_episodes = eps
             _cached_data_ts = time.time()
             print(f"[Cache] Loaded {len(eps)} series episode data from {loader_name}")
-            return
-    print("[Cache] WARNING: No pre-cached episode data available")
+            break
+    else:
+        print("[Cache] WARNING: No pre-cached episode data available")
+
+    # Load English names map
+    for loader_name, loader in [("local", _load_local_json), ("GitHub", _load_github_json)]:
+        names = loader("english_names.json")
+        if names and isinstance(names, dict):
+            _english_names = names
+            print(f"[Cache] Loaded {len(names)} English name mappings from {loader_name}")
+            break
 
 
 # ─── Xtream API ───
@@ -356,6 +366,11 @@ MANIFEST = {
     ],
     "behaviorHints": {"configurable": False},
 }
+
+
+def _get_display_name(series_id: str, original_name: str) -> str:
+    """Get English display name if available, otherwise return original."""
+    return _english_names.get(str(series_id), original_name)
 
 
 def _safe_int(val, default: int = 0) -> int:
@@ -759,7 +774,11 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
                 for q in queries:
                     for s in series:
                         sid = str(s.get("series_id", ""))
-                        score = _search_score(q, s.get("name", ""), s.get("plot", ""))
+                        # Search both original name and English name
+                        eng_name = _english_names.get(sid, "")
+                        name = s.get("name", "")
+                        combined_name = f"{name} {eng_name}" if eng_name else name
+                        score = _search_score(q, combined_name, s.get("plot", ""))
                         if score > 0 and (sid not in scored or score > scored[sid][0]):
                             scored[sid] = (score, s)
                 ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)
@@ -777,10 +796,11 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
 
             metas = []
             for s in page:
+                sid = str(s["series_id"])
                 meta = {
-                    "id": f"anime3rb_series_{s['series_id']}",
+                    "id": f"anime3rb_series_{sid}",
                     "type": "series",
-                    "name": s.get("name", ""),
+                    "name": _get_display_name(sid, s.get("name", "")),
                     "posterShape": "poster",
                 }
                 if s.get("cover"):
@@ -811,10 +831,11 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
             page = series[skip : skip + 100]
             metas = []
             for s in page:
+                sid = str(s["series_id"])
                 meta = {
-                    "id": f"anime3rb_series_{s['series_id']}",
+                    "id": f"anime3rb_series_{sid}",
                     "type": "series",
-                    "name": s.get("name", ""),
+                    "name": _get_display_name(sid, s.get("name", "")),
                     "posterShape": "poster",
                 }
                 if s.get("cover"):
@@ -844,10 +865,11 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
             page = series[skip : skip + 100]
             metas = []
             for s in page:
+                sid = str(s["series_id"])
                 meta = {
-                    "id": f"anime3rb_series_{s['series_id']}",
+                    "id": f"anime3rb_series_{sid}",
                     "type": "series",
-                    "name": s.get("name", ""),
+                    "name": _get_display_name(sid, s.get("name", "")),
                     "posterShape": "poster",
                 }
                 if s.get("cover"):
