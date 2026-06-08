@@ -332,30 +332,103 @@ MANIFEST = {
             "extra": [
                 {"name": "search", "isRequired": False},
                 {"name": "skip", "isRequired": False},
-                {"name": "genre", "isRequired": False},
-            ],
-            "genres": [
-                "أكشن", "كوميدي", "خيال", "شونين", "مغامرة", "دراما",
-                "خيال علمي", "سينين", "خارق للطبيعة", "غموض", "إيسيكاي",
-                "رياضي", "تاريخي", "ميكا", "رومانسي", "مدرسي", "قوى خارقة",
-                "نفسي", "تشويق", "رعب", "عسكري",
             ],
         },
         {
             "type": "series",
             "id": "anime3rb_new",
             "name": "أنمي - جديد",
-            "extra": [
-                {"name": "skip", "isRequired": False},
-            ],
+            "extra": [{"name": "skip", "isRequired": False}],
         },
         {
             "type": "series",
-            "id": "anime3rb_popular",
-            "name": "أنمي - الأكثر شعبية",
-            "extra": [
-                {"name": "skip", "isRequired": False},
-            ],
+            "id": "anime3rb_trending",
+            "name": "أنمي - الشائع",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_top_rated",
+            "name": "أنمي - Top Rated",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_action",
+            "name": "أنمي - أكشن",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_comedy",
+            "name": "أنمي - كوميدي",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_fantasy",
+            "name": "أنمي - خيال",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_shounen",
+            "name": "أنمي - شونين",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_adventure",
+            "name": "أنمي - مغامرة",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_drama",
+            "name": "أنمي - دراما",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_scifi",
+            "name": "أنمي - خيال علمي",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_seinen",
+            "name": "أنمي - سينين",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_supernatural",
+            "name": "أنمي - خارق للطبيعة",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_mystery",
+            "name": "أنمي - غموض",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_isekai",
+            "name": "أنمي - إيسيكاي",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_mecha",
+            "name": "أنمي - ميكا",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "series",
+            "id": "anime3rb_thriller",
+            "name": "أنمي - تشويق",
+            "extra": [{"name": "skip", "isRequired": False}],
         },
         {
             "type": "movie",
@@ -762,6 +835,47 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
                 extras[k] = v
 
     try:
+        # Genre catalog ID to Arabic genre name mapping
+        _GENRE_CATALOGS = {
+            "anime3rb_action": "أكشن",
+            "anime3rb_comedy": "كوميدي",
+            "anime3rb_fantasy": "خيال",
+            "anime3rb_shounen": "شونين",
+            "anime3rb_adventure": "مغامرة",
+            "anime3rb_drama": "دراما",
+            "anime3rb_scifi": "خيال علمي",
+            "anime3rb_seinen": "سينين",
+            "anime3rb_supernatural": "خارق للطبيعة",
+            "anime3rb_mystery": "غموض",
+            "anime3rb_isekai": "إيسيكاي",
+            "anime3rb_mecha": "ميكا",
+            "anime3rb_thriller": "تشويق",
+        }
+
+        def _build_metas(series_list: list, skip: int = 0) -> list:
+            page = series_list[skip : skip + 100]
+            metas = []
+            for s in page:
+                sid = str(s["series_id"])
+                meta = {
+                    "id": f"anime3rb_series_{sid}",
+                    "type": "series",
+                    "name": _get_display_name(sid, s.get("name", "")),
+                    "posterShape": "poster",
+                }
+                if s.get("cover"):
+                    meta["poster"] = s["cover"]
+                if s.get("plot"):
+                    meta["description"] = s["plot"]
+                if s.get("genre"):
+                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
+                if s.get("releaseDate"):
+                    meta["releaseInfo"] = s["releaseDate"][:4]
+                if s.get("rating"):
+                    meta["imdbRating"] = s["rating"]
+                metas.append(meta)
+            return metas
+
         if content_type == "series" and catalog_id == "anime3rb_series":
             series = get_all_series()
             if not isinstance(series, list):
@@ -774,7 +888,6 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
                 for q in queries:
                     for s in series:
                         sid = str(s.get("series_id", ""))
-                        # Search both original name and English name
                         eng_name = _english_names.get(sid, "")
                         name = s.get("name", "")
                         combined_name = f"{name} {eng_name}" if eng_name else name
@@ -784,106 +897,65 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
                 ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)
                 series = [s for _, s in ranked]
 
-            if extras.get("genre"):
-                genre_filter = unquote(extras["genre"])
-                series = [
-                    s for s in series
-                    if genre_filter in [g.strip() for g in (s.get("genre") or "").split(",")]
-                ]
-
             skip = int(extras.get("skip", 0))
-            page = series[skip : skip + 100]
-
-            metas = []
-            for s in page:
-                sid = str(s["series_id"])
-                meta = {
-                    "id": f"anime3rb_series_{sid}",
-                    "type": "series",
-                    "name": _get_display_name(sid, s.get("name", "")),
-                    "posterShape": "poster",
-                }
-                if s.get("cover"):
-                    meta["poster"] = s["cover"]
-                if s.get("plot"):
-                    meta["description"] = s["plot"]
-                if s.get("genre"):
-                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
-                if s.get("releaseDate"):
-                    meta["releaseInfo"] = s["releaseDate"][:4]
-                if s.get("rating"):
-                    meta["imdbRating"] = s["rating"]
-                metas.append(meta)
-
-            return stremio_response({"metas": metas})
+            return stremio_response({"metas": _build_metas(series, skip)})
 
         if content_type == "series" and catalog_id == "anime3rb_new":
             series = get_all_series()
             if not isinstance(series, list):
                 return stremio_response({"metas": []})
-            # Sort by release date (newest first)
             series = sorted(
                 [s for s in series if s.get("releaseDate")],
                 key=lambda s: s.get("releaseDate", ""),
                 reverse=True,
             )
             skip = int(extras.get("skip", 0))
-            page = series[skip : skip + 100]
-            metas = []
-            for s in page:
-                sid = str(s["series_id"])
-                meta = {
-                    "id": f"anime3rb_series_{sid}",
-                    "type": "series",
-                    "name": _get_display_name(sid, s.get("name", "")),
-                    "posterShape": "poster",
-                }
-                if s.get("cover"):
-                    meta["poster"] = s["cover"]
-                if s.get("plot"):
-                    meta["description"] = s["plot"]
-                if s.get("genre"):
-                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
-                if s.get("releaseDate"):
-                    meta["releaseInfo"] = s["releaseDate"][:4]
-                if s.get("rating"):
-                    meta["imdbRating"] = s["rating"]
-                metas.append(meta)
-            return stremio_response({"metas": metas})
+            return stremio_response({"metas": _build_metas(series, skip)})
 
-        if content_type == "series" and catalog_id == "anime3rb_popular":
+        if content_type == "series" and catalog_id == "anime3rb_trending":
             series = get_all_series()
             if not isinstance(series, list):
                 return stremio_response({"metas": []})
-            # Sort by rating (highest first)
+            # Trending = recent releases with high rating
+            series = [s for s in series if s.get("releaseDate") and s.get("rating")]
+            series = sorted(
+                series,
+                key=lambda s: (s.get("releaseDate", ""), float(s.get("rating", 0) or 0)),
+                reverse=True,
+            )
+            skip = int(extras.get("skip", 0))
+            return stremio_response({"metas": _build_metas(series, skip)})
+
+        if content_type == "series" and catalog_id == "anime3rb_top_rated":
+            series = get_all_series()
+            if not isinstance(series, list):
+                return stremio_response({"metas": []})
             series = sorted(
                 [s for s in series if s.get("rating")],
                 key=lambda s: float(s.get("rating", 0) or 0),
                 reverse=True,
             )
             skip = int(extras.get("skip", 0))
-            page = series[skip : skip + 100]
-            metas = []
-            for s in page:
-                sid = str(s["series_id"])
-                meta = {
-                    "id": f"anime3rb_series_{sid}",
-                    "type": "series",
-                    "name": _get_display_name(sid, s.get("name", "")),
-                    "posterShape": "poster",
-                }
-                if s.get("cover"):
-                    meta["poster"] = s["cover"]
-                if s.get("plot"):
-                    meta["description"] = s["plot"]
-                if s.get("genre"):
-                    meta["genres"] = [g.strip() for g in s["genre"].split(",")]
-                if s.get("releaseDate"):
-                    meta["releaseInfo"] = s["releaseDate"][:4]
-                if s.get("rating"):
-                    meta["imdbRating"] = s["rating"]
-                metas.append(meta)
-            return stremio_response({"metas": metas})
+            return stremio_response({"metas": _build_metas(series, skip)})
+
+        # Handle genre-based catalogs
+        if content_type == "series" and catalog_id in _GENRE_CATALOGS:
+            genre_name = _GENRE_CATALOGS[catalog_id]
+            series = get_all_series()
+            if not isinstance(series, list):
+                return stremio_response({"metas": []})
+            series = [
+                s for s in series
+                if genre_name in [g.strip() for g in (s.get("genre") or "").split(",")]
+            ]
+            # Sort genre catalogs by rating
+            series = sorted(
+                series,
+                key=lambda s: float(s.get("rating", 0) or 0),
+                reverse=True,
+            )
+            skip = int(extras.get("skip", 0))
+            return stremio_response({"metas": _build_metas(series, skip)})
 
         if content_type == "movie" and catalog_id == "anime3rb_movies":
             vod = get_all_vod()
