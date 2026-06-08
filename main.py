@@ -1164,6 +1164,7 @@ def meta(content_type: str, meta_id: str):
                 ]
 
             videos = []
+            cover = info.get("cover", "")
             if "episodes" in data:
                 for season_num, episodes in data["episodes"].items():
                     for ep in episodes:
@@ -1174,6 +1175,8 @@ def meta(content_type: str, meta_id: str):
                             "season": _safe_int(season_num),
                             "episode": _safe_int(ep_num_raw),
                         }
+                        if cover:
+                            vid["thumbnail"] = cover
                         if ep.get("added"):
                             try:
                                 vid["released"] = datetime.fromtimestamp(
