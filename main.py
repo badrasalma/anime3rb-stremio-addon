@@ -283,13 +283,13 @@ def get_vod_info(vod_id: str) -> dict:
     cached = cache_get(key)
     if cached:
         return cached
-    if not USE_CACHED:
-        try:
-            data = api_call("get_vod_info", f"&vod_id={vod_id}")
-            cache_set(key, data)
-            return data
-        except Exception as e:
-            print(f"[API] Failed to get VOD info {vod_id}: {e}")
+    # Always try API for individual movie info (lightweight, single request)
+    try:
+        data = api_call("get_vod_info", f"&vod_id={vod_id}")
+        cache_set(key, data)
+        return data
+    except Exception as e:
+        print(f"[API] Failed to get VOD info {vod_id}: {e}")
     return {}
 
 
@@ -539,15 +539,19 @@ def _tvdb_get(path: str) -> dict | None:
         return None
 
 
-def _tvdb_search(anime_name: str) -> int | None:
-    """Search TVDB for an anime by name and return the TVDB series ID."""
-    key = f"tvdb_id_{_normalize(anime_name)}"
+def _tvdb_search(anime_name: str, content_type: str = "series") -> int | None:
+    """Search TVDB for an anime by name and return the TVDB ID."""
+    tvdb_type = "movie" if content_type == "movie" else "series"
+    key = f"tvdb_id_{tvdb_type}_{_normalize(anime_name)}"
     cached = cache_get(key, KITSU_TTL)
     if cached is not None:
         return cached if cached != 0 else None
     try:
         encoded = requests.utils.quote(anime_name)
-        data = _tvdb_get(f"search?query={encoded}&type=series")
+        data = _tvdb_get(f"search?query={encoded}&type={tvdb_type}")
+        if not data and tvdb_type == "movie":
+            # Fallback: try without type filter for movies
+            data = _tvdb_get(f"search?query={encoded}")
         if data:
             norm_name = _normalize(anime_name)
             # Exact name match
@@ -577,30 +581,32 @@ def _tvdb_search(anime_name: str) -> int | None:
         return None
 
 
-def _tvdb_artwork(tvdb_id: int) -> dict:
-    """Get artwork URLs from TVDB for a series.
+def _tvdb_artwork(tvdb_id: int, content_type: str = "series") -> dict:
+    """Get artwork URLs from TVDB for a series or movie.
     Returns dict with keys: poster, background, logo (or empty strings)."""
-    key = f"tvdb_art_{tvdb_id}"
+    key = f"tvdb_art_{content_type}_{tvdb_id}"
     cached = cache_get(key, KITSU_TTL)
     if cached is not None:
         return cached
 
     result = {"poster": "", "background": "", "logo": ""}
-    data = _tvdb_get(f"series/{tvdb_id}/extended")
+    endpoint = "movies" if content_type == "movie" else "series"
+    data = _tvdb_get(f"{endpoint}/{tvdb_id}/extended")
     if not data:
         cache_set(key, result)
         return result
 
     artworks = data.get("artworks", [])
-    # TVDB artwork types: 2=poster, 3=background, 23=clearlogo
+    # Series art types: 2=poster, 3=background, 23=clearlogo
+    # Movie art types: 14=poster, 15=background
     for a in artworks:
         url = a.get("image", "")
         if not url:
             continue
         art_type = a.get("type", 0)
-        if art_type == 2 and not result["poster"]:
+        if art_type in (2, 14) and not result["poster"]:
             result["poster"] = url
-        elif art_type == 3 and not result["background"]:
+        elif art_type in (3, 15) and not result["background"]:
             result["background"] = url
         elif art_type == 23 and not result["logo"]:
             result["logo"] = url
@@ -1022,9 +1028,13 @@ def meta(content_type: str, meta_id: str):
 
             # Enrich with TVDB artwork (background + logo)
             if movie_name:
-                tvdb_id = _tvdb_search(movie_name)
+                tvdb_id = _tvdb_search(movie_name, "movie")
+                art_type = "movie"
+                if not tvdb_id:
+                    tvdb_id = _tvdb_search(movie_name, "series")
+                    art_type = "series"
                 if tvdb_id:
-                    tvdb_art = _tvdb_artwork(tvdb_id)
+                    tvdb_art = _tvdb_artwork(tvdb_id, art_type)
                     if tvdb_art.get("background"):
                         result["background"] = tvdb_art["background"]
                     if tvdb_art.get("logo"):
