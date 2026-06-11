@@ -257,8 +257,10 @@ def stream(content_type: str, stream_id: str):
     Example: kitsu:210:1:1202 (Detective Conan, Season 1, Episode 1202)
     """
     _load_cached_data()
+    print(f"[Stream] REQUEST: content_type={content_type} stream_id={stream_id}")
     try:
         if not stream_id.startswith("kitsu:"):
+            print(f"[Stream] REJECTED: does not start with 'kitsu:' -> '{stream_id[:30]}'")
             return stremio_response({"streams": []})
 
         parts = stream_id.split(":")
@@ -334,6 +336,32 @@ def stream(content_type: str, stream_id: str):
         print(f"[Stream] Error: {e}")
 
     return stremio_response({"streams": []})
+
+
+@app.get("/debug/{content_type}/{stream_id}")
+def debug_stream(content_type: str, stream_id: str):
+    """Debug endpoint to check what happens with a stream request."""
+    _load_cached_data()
+    result = {"raw_stream_id": stream_id, "content_type": content_type}
+
+    parts = stream_id.split(":")
+    result["parts"] = parts
+    result["starts_with_kitsu"] = stream_id.startswith("kitsu:")
+
+    if len(parts) > 1:
+        kitsu_id = parts[1]
+        result["kitsu_id"] = kitsu_id
+        result["found_in_map"] = kitsu_id in _kitsu_map
+        if kitsu_id in _kitsu_map:
+            result["anime3rb_series_id"] = _kitsu_map[kitsu_id]
+    
+    if len(parts) >= 4:
+        result["season"] = parts[2]
+        result["episode"] = parts[3]
+
+    result["kitsu_map_size"] = len(_kitsu_map)
+    result["sample_keys"] = list(_kitsu_map.keys())[:10]
+    return result
 
 
 @app.get("/health")
