@@ -1,37 +1,35 @@
-name: Update anime data cache
+name: Update anime data
 
 on:
   schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+    # Run daily at 04:00 UTC
+    - cron: '0 4 * * *'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  update-data:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: devin/deploy
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: pip install cloudscraper requests
 
-      - name: Fetch updated data
-        run: python fetch_data.py
-        env:
-          ANIME3RB_URL: https://anime3rb.vip
-          ANIME3RB_USER: ${{ secrets.ANIME3RB_USER }}
-          ANIME3RB_PASS: ${{ secrets.ANIME3RB_PASS }}
+      - name: Update episode data
+        run: python fetch_data.py update
 
-      - name: Commit and push updated data
+      - name: Build Kitsu ID mapping
+        run: python build_kitsu_map.py
+
+      - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -39,6 +37,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update cached anime data [skip ci]"
+            git commit -m "chore: auto-update episode data $(date -u +%Y-%m-%d)"
             git push
           fi
