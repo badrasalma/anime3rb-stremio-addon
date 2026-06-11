@@ -253,8 +253,9 @@ def manifest():
 def stream(content_type: str, stream_id: str):
     """Handle stream requests using Kitsu IDs.
     
-    Format: kitsu:{kitsu_id}:{season}:{episode}
-    Example: kitsu:210:1:1202 (Detective Conan, Season 1, Episode 1202)
+    Supported formats:
+      kitsu:{id}:{episode}           (Kitsu addon: kitsu:210:1)
+      kitsu:{id}:{season}:{episode}  (AIOMetadata: kitsu:210:1:1)
     """
     _load_cached_data()
     print(f"[Stream] REQUEST: content_type={content_type} stream_id={stream_id}")
@@ -264,41 +265,62 @@ def stream(content_type: str, stream_id: str):
             return stremio_response({"streams": []})
 
         parts = stream_id.split(":")
-        # kitsu:ID:season:episode or kitsu:ID (movie)
         kitsu_id = parts[1] if len(parts) > 1 else ""
 
         if not kitsu_id:
             return stremio_response({"streams": []})
 
-        # Look up anime3rb series_id from Kitsu map
         series_id = _kitsu_map.get(kitsu_id)
         if not series_id:
             print(f"[Stream] Kitsu ID {kitsu_id} not found in map")
             return stremio_response({"streams": []})
 
         if content_type == "series":
-            if len(parts) < 4:
+            if len(parts) < 3:
                 return stremio_response({"streams": []})
 
-            season_num = parts[2]
-            episode_num = parts[3]
+            if len(parts) == 3:
+                # Kitsu addon format: kitsu:{id}:{episode}
+                episode_num = parts[2]
+                season_num = None
+            elif len(parts) >= 4:
+                # AIOMetadata format: kitsu:{id}:{season}:{episode}
+                season_num = parts[2]
+                episode_num = parts[3]
+            else:
+                return stremio_response({"streams": []})
+
+            print(f"[Stream] Looking up series_id={series_id} season={season_num} episode={episode_num}")
 
             data = get_series_info(series_id)
             if not data or "episodes" not in data:
+                print(f"[Stream] No episode data for series_id={series_id}")
                 return stremio_response({"streams": []})
 
-            season_eps = data["episodes"].get(season_num)
-            if not season_eps:
-                # Try season "1" as fallback (most anime3rb entries have 1 season)
-                season_eps = data["episodes"].get("1")
-            if not season_eps:
-                return stremio_response({"streams": []})
+            ep = None
 
-            ep = next(
-                (e for e in season_eps if str(e.get("episode_num")) == episode_num),
-                None,
-            )
+            if season_num:
+                # Try the requested season first
+                season_eps = data["episodes"].get(season_num)
+                if season_eps:
+                    ep = next(
+                        (e for e in season_eps if str(e.get("episode_num")) == episode_num),
+                        None,
+                    )
+
             if not ep:
+                # Fallback: search ALL seasons for the episode number
+                for sn in sorted(data["episodes"].keys(), key=lambda x: int(x) if x.isdigit() else 0):
+                    season_eps = data["episodes"][sn]
+                    ep = next(
+                        (e for e in season_eps if str(e.get("episode_num")) == episode_num),
+                        None,
+                    )
+                    if ep:
+                        break
+
+            if not ep:
+                print(f"[Stream] Episode {episode_num} not found in series {series_id}")
                 return stremio_response({"streams": []})
 
             ext = ep.get("container_extension", "mp4")
