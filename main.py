@@ -81,7 +81,7 @@ def cache_set(key: str, val: Any) -> None:
 
 # ─── Pre-cached data ───
 _cached_episodes: dict = {}  # series_id -> episode data
-_kitsu_map: dict[str, str] = {}  # kitsu_id -> anime3rb series_id
+_kitsu_map: dict[str, dict] = {}  # kitsu_id -> {"id": "...", "type": "series"|"movie"}
 _cached_data_ts: float = 0
 CACHED_DATA_TTL = 6 * 60 * 60
 
@@ -126,8 +126,15 @@ def _load_cached_data() -> None:
     for loader_name, loader in [("local", _load_local_json), ("GitHub", _load_github_json)]:
         kmap = loader("kitsu_map.json")
         if kmap and isinstance(kmap, dict):
-            _kitsu_map = kmap
-            print(f"[Cache] Loaded {len(kmap)} Kitsu ID mappings from {loader_name}")
+            # Migrate legacy format (plain string → dict with type)
+            migrated = {}
+            for k, v in kmap.items():
+                if isinstance(v, str):
+                    migrated[k] = {"id": v, "type": "series"}
+                else:
+                    migrated[k] = v
+            _kitsu_map = migrated
+            print(f"[Cache] Loaded {len(migrated)} Kitsu ID mappings from {loader_name}")
             break
 
 
@@ -270,37 +277,37 @@ def stream(content_type: str, stream_id: str):
         if not kitsu_id:
             return stremio_response({"streams": []})
 
-        series_id = _kitsu_map.get(kitsu_id)
-        if not series_id:
+        entry = _kitsu_map.get(kitsu_id)
+        if not entry:
             print(f"[Stream] Kitsu ID {kitsu_id} not found in map")
             return stremio_response({"streams": []})
 
-        if content_type == "series":
+        entry_id = entry["id"]
+        entry_type = entry.get("type", "series")
+
+        if content_type == "series" and entry_type == "series":
             if len(parts) < 3:
                 return stremio_response({"streams": []})
 
             if len(parts) == 3:
-                # Kitsu addon format: kitsu:{id}:{episode}
                 episode_num = parts[2]
                 season_num = None
             elif len(parts) >= 4:
-                # AIOMetadata format: kitsu:{id}:{season}:{episode}
                 season_num = parts[2]
                 episode_num = parts[3]
             else:
                 return stremio_response({"streams": []})
 
-            print(f"[Stream] Looking up series_id={series_id} season={season_num} episode={episode_num}")
+            print(f"[Stream] Looking up series_id={entry_id} season={season_num} episode={episode_num}")
 
-            data = get_series_info(series_id)
+            data = get_series_info(entry_id)
             if not data or "episodes" not in data:
-                print(f"[Stream] No episode data for series_id={series_id}")
+                print(f"[Stream] No episode data for series_id={entry_id}")
                 return stremio_response({"streams": []})
 
             ep = None
 
             if season_num:
-                # Try the requested season first
                 season_eps = data["episodes"].get(season_num)
                 if season_eps:
                     ep = next(
@@ -309,7 +316,6 @@ def stream(content_type: str, stream_id: str):
                     )
 
             if not ep:
-                # Fallback: search ALL seasons for the episode number
                 for sn in sorted(data["episodes"].keys(), key=lambda x: int(x) if x.isdigit() else 0):
                     season_eps = data["episodes"][sn]
                     ep = next(
@@ -320,7 +326,7 @@ def stream(content_type: str, stream_id: str):
                         break
 
             if not ep:
-                print(f"[Stream] Episode {episode_num} not found in series {series_id}")
+                print(f"[Stream] Episode {episode_num} not found in series {entry_id}")
                 return stremio_response({"streams": []})
 
             ext = ep.get("container_extension", "mp4")
@@ -335,9 +341,8 @@ def stream(content_type: str, stream_id: str):
                 }]
             })
 
-        if content_type == "movie":
-            # For movies, series_id is actually the vod stream_id
-            vod_id = series_id
+        if content_type == "movie" or entry_type == "movie":
+            vod_id = entry_id
             all_vod = get_all_vod()
             vod_item = next(
                 (v for v in all_vod if str(v.get("stream_id")) == vod_id), None
@@ -375,7 +380,7 @@ def debug_stream(content_type: str, stream_id: str):
         result["kitsu_id"] = kitsu_id
         result["found_in_map"] = kitsu_id in _kitsu_map
         if kitsu_id in _kitsu_map:
-            result["anime3rb_series_id"] = _kitsu_map[kitsu_id]
+            result["mapping"] = _kitsu_map[kitsu_id]
     
     if len(parts) >= 4:
         result["season"] = parts[2]

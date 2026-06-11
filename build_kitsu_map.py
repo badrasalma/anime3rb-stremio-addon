@@ -1,6 +1,7 @@
-"""Build Kitsu ID → anime3rb series_id mapping.
+"""Build Kitsu ID → anime3rb mapping (series + movies).
 
-Reads data/series_list.json, searches Kitsu API for each anime name,
+Reads data/series_list.json and data/vod_list.json,
+searches Kitsu API for each anime name,
 and saves the mapping to data/kitsu_map.json.
 
 Run weekly via GitHub Actions to keep the map updated.
@@ -87,7 +88,7 @@ def search_kitsu(name: str) -> dict | None:
 
 
 def build_map():
-    """Build the full Kitsu → anime3rb mapping."""
+    """Build the full Kitsu → anime3rb mapping (series + movies)."""
     data_dir = os.path.join(os.path.dirname(__file__), "data")
     series_path = os.path.join(data_dir, "series_list.json")
 
@@ -97,21 +98,33 @@ def build_map():
     print(f"Building Kitsu map for {len(series_list)} series...")
 
     # Load existing map to skip already-mapped entries
+    # Map format: kitsu_id -> {"id": "...", "type": "series"|"movie"}
+    # Legacy format (string value) is auto-migrated to new format
     map_path = os.path.join(data_dir, "kitsu_map.json")
     existing_map = {}
     if os.path.exists(map_path):
         with open(map_path) as f:
             existing_map = json.load(f)
 
-    # kitsu_map: kitsu_id -> anime3rb_series_id
-    kitsu_map = dict(existing_map)
-    # reverse lookup: anime3rb_series_id -> kitsu_id
-    reverse = {v: k for k, v in kitsu_map.items()}
+    # Migrate legacy format (plain string values → dict with type)
+    kitsu_map = {}
+    for k, v in existing_map.items():
+        if isinstance(v, str):
+            kitsu_map[k] = {"id": v, "type": "series"}
+        else:
+            kitsu_map[k] = v
+
+    # reverse lookup: "type:anime3rb_id" -> kitsu_id
+    reverse = {}
+    for kid, info in kitsu_map.items():
+        rkey = f"{info['type']}:{info['id']}"
+        reverse[rkey] = kid
 
     matched = 0
     skipped = 0
     failed = 0
 
+    # --- Series ---
     for i, s in enumerate(series_list):
         sid = str(s["series_id"])
         name = s.get("name", "")
@@ -119,31 +132,70 @@ def build_map():
         if not name:
             continue
 
-        # Skip if already mapped
-        if sid in reverse:
+        if f"series:{sid}" in reverse:
             skipped += 1
             continue
 
         result = search_kitsu(name)
         if result:
             kid = str(result["kitsu_id"])
-            # Avoid duplicate kitsu_id mappings (keep first match)
             if kid not in kitsu_map:
-                kitsu_map[kid] = sid
-                reverse[sid] = kid
+                kitsu_map[kid] = {"id": sid, "type": "series"}
+                reverse[f"series:{sid}"] = kid
                 matched += 1
             else:
-                # kitsu_id already mapped to another series
                 skipped += 1
         else:
             failed += 1
 
         if (i + 1) % 100 == 0:
-            print(f"  Progress: {i+1}/{len(series_list)} | Matched: {matched} | Failed: {failed}")
+            print(f"  Series: {i+1}/{len(series_list)} | Matched: {matched} | Failed: {failed}")
 
         time.sleep(RATE_LIMIT_DELAY)
 
-    print(f"\nDone! Matched: {matched} | Skipped: {skipped} | Failed: {failed}")
+    print(f"\nSeries done! Matched: {matched} | Skipped: {skipped} | Failed: {failed}")
+
+    # --- Movies (VOD) ---
+    vod_path = os.path.join(data_dir, "vod_list.json")
+    if os.path.exists(vod_path):
+        with open(vod_path) as f:
+            vod_list = json.load(f)
+
+        print(f"\nBuilding Kitsu map for {len(vod_list)} movies...")
+        m_matched = 0
+        m_skipped = 0
+        m_failed = 0
+
+        for i, v in enumerate(vod_list):
+            vid = str(v.get("stream_id", ""))
+            name = v.get("name", "")
+
+            if not name or not vid:
+                continue
+
+            if f"movie:{vid}" in reverse:
+                m_skipped += 1
+                continue
+
+            result = search_kitsu(name)
+            if result:
+                kid = str(result["kitsu_id"])
+                if kid not in kitsu_map:
+                    kitsu_map[kid] = {"id": vid, "type": "movie"}
+                    reverse[f"movie:{vid}"] = kid
+                    m_matched += 1
+                else:
+                    m_skipped += 1
+            else:
+                m_failed += 1
+
+            if (i + 1) % 100 == 0:
+                print(f"  Movies: {i+1}/{len(vod_list)} | Matched: {m_matched} | Failed: {m_failed}")
+
+            time.sleep(RATE_LIMIT_DELAY)
+
+        print(f"\nMovies done! Matched: {m_matched} | Skipped: {m_skipped} | Failed: {m_failed}")
+
     print(f"Total map size: {len(kitsu_map)} entries")
 
     # Save the map
