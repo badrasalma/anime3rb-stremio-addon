@@ -92,22 +92,28 @@ def _fetch_episodes(scraper, all_info, series_ids, data_dir):
     consecutive_fails = 0
     done = 0
     updated = 0
+    failed_ids = []
 
     for sid in series_ids:
-        try:
-            data = api_get(scraper, "get_series_info", f"&series_id={sid}")
-            if data and "episodes" in data:
-                parsed = _parse_episodes(data)
-                new_count = _ep_count(parsed)
-                old_count = _ep_count(all_info.get(sid, {}))
-                if new_count != old_count:
-                    all_info[sid] = parsed
-                    updated += 1
-                consecutive_fails = 0
-            else:
+        success = False
+        for retry in range(3):
+            try:
+                data = api_get(scraper, "get_series_info", f"&series_id={sid}")
+                if data and "episodes" in data:
+                    parsed = _parse_episodes(data)
+                    new_count = _ep_count(parsed)
+                    old_count = _ep_count(all_info.get(sid, {}))
+                    if new_count != old_count:
+                        all_info[sid] = parsed
+                        updated += 1
+                    consecutive_fails = 0
+                    success = True
+                    break
+                else:
+                    consecutive_fails += 1
+            except Exception:
                 consecutive_fails += 1
-        except Exception:
-            consecutive_fails += 1
+
             if consecutive_fails >= 5:
                 print(f"  Re-initializing scraper after {consecutive_fails} fails...")
                 with open(episodes_path, "w") as f:
@@ -116,6 +122,11 @@ def _fetch_episodes(scraper, all_info, series_ids, data_dir):
                 scraper = make_scraper()
                 consecutive_fails = 0
                 time.sleep(5)
+            elif retry < 2:
+                time.sleep(5)
+
+        if not success:
+            failed_ids.append(sid)
 
         done += 1
         if done % 25 == 0:
@@ -124,6 +135,25 @@ def _fetch_episodes(scraper, all_info, series_ids, data_dir):
                 json.dump(all_info, f, ensure_ascii=False, separators=(",", ":"))
 
         time.sleep(2)
+
+    # Retry failed series one more time
+    if failed_ids:
+        print(f"  Retrying {len(failed_ids)} failed series...")
+        time.sleep(30)
+        scraper = make_scraper()
+        for sid in failed_ids:
+            try:
+                data = api_get(scraper, "get_series_info", f"&series_id={sid}")
+                if data and "episodes" in data:
+                    parsed = _parse_episodes(data)
+                    new_count = _ep_count(parsed)
+                    old_count = _ep_count(all_info.get(sid, {}))
+                    if new_count != old_count:
+                        all_info[sid] = parsed
+                        updated += 1
+            except Exception:
+                pass
+            time.sleep(3)
 
     # Final save
     with open(episodes_path, "w") as f:
