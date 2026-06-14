@@ -82,6 +82,8 @@ def cache_set(key: str, val: Any) -> None:
 # ─── Pre-cached data ───
 _cached_episodes: dict = {}  # series_id -> episode data
 _kitsu_map: dict[str, dict] = {}  # kitsu_id -> {"id": "...", "type": "series"|"movie"}
+_imdb_map: dict[str, str] = {}  # imdb_id -> vod_stream_id (for movies)
+_tmdb_map: dict[str, str] = {}  # tmdb_id -> vod_stream_id (for movies)
 _cached_data_ts: float = 0
 CACHED_DATA_TTL = 6 * 60 * 60
 
@@ -112,8 +114,8 @@ def _load_local_json(filename: str) -> Any:
 
 
 def _load_cached_data() -> None:
-    """Load pre-cached episode data and Kitsu mapping."""
-    global _cached_episodes, _cached_data_ts, _kitsu_map
+    """Load pre-cached episode data, Kitsu mapping, IMDB mapping, and TMDB mapping."""
+    global _cached_episodes, _cached_data_ts, _kitsu_map, _imdb_map, _tmdb_map
     if time.time() - _cached_data_ts < CACHED_DATA_TTL and _cached_episodes:
         return
 
@@ -140,6 +142,20 @@ def _load_cached_data() -> None:
                     migrated[k] = v
             _kitsu_map = migrated
             print(f"[Cache] Loaded {len(migrated)} Kitsu ID mappings from {loader_name}")
+            break
+
+    for loader_name, loader in [("local", _load_local_json), ("GitHub", _load_github_json)]:
+        imap = loader("imdb_map.json")
+        if imap and isinstance(imap, dict):
+            _imdb_map = imap
+            print(f"[Cache] Loaded {len(imap)} IMDB movie mappings from {loader_name}")
+            break
+
+    for loader_name, loader in [("local", _load_local_json), ("GitHub", _load_github_json)]:
+        tmap = loader("tmdb_map.json")
+        if tmap and isinstance(tmap, dict):
+            _tmdb_map = tmap
+            print(f"[Cache] Loaded {len(tmap)} TMDB movie mappings from {loader_name}")
             break
 
 
@@ -217,15 +233,20 @@ def get_all_vod() -> list[dict]:
 # ─── Stremio Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "name": "Anime3rb بث",
-    "description": "روابط بث الأنمي من anime3rb.vip — يعمل مع أي كتالوج يستخدم Kitsu IDs",
+    "description": "روابط بث الأنمي من anime3rb.vip — يدعم Kitsu IDs للمسلسلات و TMDB/IMDB للأفلام",
     "logo": "https://anime3rb.vip/favicon.ico",
     "resources": [
         {
             "name": "stream",
-            "types": ["series", "movie"],
+            "types": ["series"],
             "idPrefixes": ["kitsu:"],
+        },
+        {
+            "name": "stream",
+            "types": ["movie"],
+            "idPrefixes": ["kitsu:", "tt", "tmdb:"],
         },
     ],
     "types": ["series", "movie"],
@@ -278,9 +299,58 @@ def stream(content_type: str, stream_id: str):
     }
     print(f"[Stream] REQUEST: content_type={content_type} stream_id={stream_id}")
     try:
+        # Handle TMDB IDs for movies (tmdb:XXXXX)
+        if stream_id.startswith("tmdb:"):
+            tmdb_id = stream_id.split(":")[1] if ":" in stream_id else ""
+            vod_id = _tmdb_map.get(tmdb_id)
+            if not vod_id:
+                print(f"[Stream] TMDB ID {tmdb_id} not found in map")
+                log_entry["result"] = f"not_found: tmdb_id={tmdb_id}"
+                _request_log.append(log_entry)
+                return stremio_response({"streams": []})
+            all_vod = get_all_vod()
+            vod_item = next((v for v in all_vod if str(v.get("stream_id")) == vod_id), None) if isinstance(all_vod, list) else None
+            ext = (vod_item.get("container_extension") if vod_item else None) or "mp4"
+            stream_url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{vod_id}.{ext}"
+            log_entry["result"] = f"success: movie tmdb={tmdb_id} vod_id={vod_id}"
+            _request_log.append(log_entry)
+            return stremio_response({
+                "streams": [{
+                    "url": stream_url,
+                    "title": f"Anime3rb\n{vod_item.get('name', '') if vod_item else ''}",
+                    "name": "Anime3rb",
+                    "behaviorHints": {"notWebReady": True},
+                }]
+            })
+
+        # Handle IMDB IDs for movies (tt1234567)
+        if stream_id.startswith("tt"):
+            imdb_id = stream_id.split(":")[0]  # tt1234567 or tt1234567:extra
+            vod_id = _imdb_map.get(imdb_id)
+            if not vod_id:
+                print(f"[Stream] IMDB ID {imdb_id} not found in map")
+                log_entry["result"] = f"not_found: imdb_id={imdb_id}"
+                _request_log.append(log_entry)
+                return stremio_response({"streams": []})
+            all_vod = get_all_vod()
+            vod_item = next((v for v in all_vod if str(v.get("stream_id")) == vod_id), None) if isinstance(all_vod, list) else None
+            ext = (vod_item.get("container_extension") if vod_item else None) or "mp4"
+            stream_url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{vod_id}.{ext}"
+            log_entry["result"] = f"success: movie imdb={imdb_id} vod_id={vod_id}"
+            _request_log.append(log_entry)
+            return stremio_response({
+                "streams": [{
+                    "url": stream_url,
+                    "title": f"Anime3rb\n{vod_item.get('name', '') if vod_item else ''}",
+                    "name": "Anime3rb",
+                    "behaviorHints": {"notWebReady": True},
+                }]
+            })
+
+        # Handle Kitsu IDs
         if not stream_id.startswith("kitsu:"):
-            print(f"[Stream] REJECTED: does not start with 'kitsu:' -> '{stream_id[:30]}'")
-            log_entry["result"] = "rejected: not kitsu prefix"
+            print(f"[Stream] REJECTED: unrecognized prefix -> '{stream_id[:30]}'")
+            log_entry["result"] = "rejected: unknown prefix"
             _request_log.append(log_entry)
             return stremio_response({"streams": []})
 
@@ -427,6 +497,8 @@ def health():
     return {
         "status": "ok",
         "kitsu_map_size": len(_kitsu_map),
+        "tmdb_map_size": len(_tmdb_map),
+        "imdb_map_size": len(_imdb_map),
         "cached_episodes": len(_cached_episodes),
         "cache_size_mb": round(_cache_size_mb(), 1),
         "use_cached": USE_CACHED,
