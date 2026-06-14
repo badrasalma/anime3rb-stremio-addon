@@ -85,6 +85,11 @@ _kitsu_map: dict[str, dict] = {}  # kitsu_id -> {"id": "...", "type": "series"|"
 _cached_data_ts: float = 0
 CACHED_DATA_TTL = 6 * 60 * 60
 
+# ─── Request log (last 100 stream requests) ───
+from collections import deque
+from datetime import datetime, timezone
+_request_log: deque = deque(maxlen=100)
+
 
 def _load_github_json(filename: str) -> Any:
     url = f"{GITHUB_DATA_URL}/{filename}"
@@ -265,21 +270,33 @@ def stream(content_type: str, stream_id: str):
       kitsu:{id}:{season}:{episode}  (AIOMetadata: kitsu:210:1:1)
     """
     _load_cached_data()
+    log_entry = {
+        "time": datetime.now(timezone.utc).isoformat(),
+        "content_type": content_type,
+        "stream_id": stream_id,
+        "result": "pending",
+    }
     print(f"[Stream] REQUEST: content_type={content_type} stream_id={stream_id}")
     try:
         if not stream_id.startswith("kitsu:"):
             print(f"[Stream] REJECTED: does not start with 'kitsu:' -> '{stream_id[:30]}'")
+            log_entry["result"] = "rejected: not kitsu prefix"
+            _request_log.append(log_entry)
             return stremio_response({"streams": []})
 
         parts = stream_id.split(":")
         kitsu_id = parts[1] if len(parts) > 1 else ""
 
         if not kitsu_id:
+            log_entry["result"] = "rejected: empty kitsu_id"
+            _request_log.append(log_entry)
             return stremio_response({"streams": []})
 
         entry = _kitsu_map.get(kitsu_id)
         if not entry:
             print(f"[Stream] Kitsu ID {kitsu_id} not found in map")
+            log_entry["result"] = f"not_found: kitsu_id={kitsu_id}"
+            _request_log.append(log_entry)
             return stremio_response({"streams": []})
 
         entry_id = entry["id"]
@@ -332,6 +349,8 @@ def stream(content_type: str, stream_id: str):
             ext = ep.get("container_extension", "mp4")
             stream_url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{ep['stream_id']}.{ext}"
 
+            log_entry["result"] = f"success: series ep={episode_num}"
+            _request_log.append(log_entry)
             return stremio_response({
                 "streams": [{
                     "url": stream_url,
@@ -350,6 +369,8 @@ def stream(content_type: str, stream_id: str):
             ext = (vod_item.get("container_extension") if vod_item else None) or "mp4"
             stream_url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{vod_id}.{ext}"
 
+            log_entry["result"] = f"success: movie vod_id={vod_id}"
+            _request_log.append(log_entry)
             return stremio_response({
                 "streams": [{
                     "url": stream_url,
@@ -361,7 +382,10 @@ def stream(content_type: str, stream_id: str):
 
     except Exception as e:
         print(f"[Stream] Error: {e}")
+        log_entry["result"] = f"error: {e}"
 
+    log_entry["result"] = log_entry.get("result", "no_match")
+    _request_log.append(log_entry)
     return stremio_response({"streams": []})
 
 
@@ -389,6 +413,12 @@ def debug_stream(content_type: str, stream_id: str):
     result["kitsu_map_size"] = len(_kitsu_map)
     result["sample_keys"] = list(_kitsu_map.keys())[:10]
     return result
+
+
+@app.get("/logs")
+def logs():
+    """View last 100 stream requests for debugging."""
+    return {"requests": list(_request_log)}
 
 
 @app.get("/health")
