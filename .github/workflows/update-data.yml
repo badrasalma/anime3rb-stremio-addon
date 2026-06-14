@@ -32,6 +32,11 @@ jobs:
       - name: Build Kitsu ID mapping
         run: python build_kitsu_map.py
 
+      - name: Build TMDB movie mapping
+        run: python build_tmdb_map.py
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
