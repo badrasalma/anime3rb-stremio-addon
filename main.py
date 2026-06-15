@@ -163,11 +163,12 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
         return r.json()
 
 
-def get_series_info(series_id: str) -> dict:
+def get_series_info(series_id: str, needed_episode: str | None = None) -> dict:
     key = f"series_info_{series_id}"
     cached = cache_get(key, SERIES_INFO_TTL)
     if cached:
-        return cached
+        if needed_episode is None or _has_episode(cached, needed_episode):
+            return cached
     _load_cached_data()
     sid = str(series_id)
     if sid in _cached_episodes:
@@ -183,8 +184,10 @@ def get_series_info(series_id: str) -> dict:
                     "title": ep.get("t", ""),
                 })
         result = {"episodes": episodes}
-        cache_set(key, result)
-        return result
+        if needed_episode is None or _has_episode(result, needed_episode):
+            cache_set(key, result)
+            return result
+        print(f"[Cache] Episode {needed_episode} not in cached data for series {series_id}, trying live API...")
     if not USE_CACHED:
         try:
             data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
@@ -195,10 +198,19 @@ def get_series_info(series_id: str) -> dict:
     return {}
 
 
+def _has_episode(data: dict, episode_num: str) -> bool:
+    """Check if episode data contains the given episode number."""
+    for season_eps in data.get("episodes", {}).values():
+        for ep in season_eps:
+            if str(ep.get("episode_num")) == episode_num:
+                return True
+    return False
+
+
 # ─── Stremio Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "name": "Anime3rb بث",
     "description": "روابط بث الأنمي من anime3rb.vip — مسلسلات أنمي فقط (Kitsu IDs)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -296,7 +308,7 @@ def stream(content_type: str, stream_id: str):
 
             print(f"[Stream] Looking up series_id={entry_id} season={season_num} episode={episode_num}")
 
-            data = get_series_info(entry_id)
+            data = get_series_info(entry_id, needed_episode=episode_num)
             if not data or "episodes" not in data:
                 print(f"[Stream] No episode data for series_id={entry_id}")
                 return stremio_response({"streams": []})
