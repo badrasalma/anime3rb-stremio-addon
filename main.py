@@ -188,13 +188,13 @@ def get_series_info(series_id: str, needed_episode: str | None = None) -> dict:
             cache_set(key, result)
             return result
         print(f"[Cache] Episode {needed_episode} not in cached data for series {series_id}, trying live API...")
-    if not USE_CACHED:
-        try:
-            data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
-            cache_set(key, data)
-            return data
-        except Exception as e:
-            print(f"[API] Failed to get series info {series_id}: {e}")
+    # Always try live API as fallback (for new episodes not yet in cache)
+    try:
+        data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
+        cache_set(key, data)
+        return data
+    except Exception as e:
+        print(f"[API] Failed to get series info {series_id}: {e}")
     return {}
 
 
