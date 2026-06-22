@@ -26,6 +26,10 @@ from fastapi.middleware.cors import CORSMiddleware
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
 USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
 PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
+TVDB_API_KEY = os.environ.get("TVDB_API_KEY", "962fd58f-6940-4666-8d0c-8d918815ffba")
+
+_tvdb_token: str = ""
+_tvdb_token_ts: float = 0
 
 # ─── Cloudscraper ───
 def _make_scraper():
@@ -291,6 +295,125 @@ def get_vod_info(vod_id: str) -> dict:
     return {}
 
 
+# ─── TVDB API (for background + logo) ───
+import re
+TVDB_TTL = 24 * 60 * 60
+
+
+def _tvdb_login() -> str:
+    global _tvdb_token, _tvdb_token_ts
+    if _tvdb_token and (time.time() - _tvdb_token_ts) < 25 * 24 * 3600:
+        return _tvdb_token
+    try:
+        r = requests.post(
+            "https://api4.thetvdb.com/v4/login",
+            json={"apikey": TVDB_API_KEY},
+            timeout=10,
+        )
+        r.raise_for_status()
+        _tvdb_token = r.json().get("data", {}).get("token", "")
+        _tvdb_token_ts = time.time()
+        return _tvdb_token
+    except Exception as e:
+        print(f"[TVDB] Login error: {e}")
+        return ""
+
+
+def _tvdb_get(path: str) -> dict | None:
+    token = _tvdb_login()
+    if not token:
+        return None
+    try:
+        r = requests.get(
+            f"https://api4.thetvdb.com/v4/{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("data")
+    except Exception:
+        return None
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r'[^\w\s]', ' ', text.lower()).strip()
+
+
+def _tvdb_search(name: str, content_type: str = "series") -> int | None:
+    tvdb_type = "movie" if content_type == "movie" else "series"
+    key = f"tvdb_id_{tvdb_type}_{_normalize(name)}"
+    cached = cache_get(key, TVDB_TTL)
+    if cached is not None:
+        return cached if cached != 0 else None
+    try:
+        encoded = requests.utils.quote(name)
+        data = _tvdb_get(f"search?query={encoded}&type={tvdb_type}")
+        if not data and tvdb_type == "movie":
+            data = _tvdb_get(f"search?query={encoded}")
+        if data:
+            norm = _normalize(name)
+            for r in data:
+                if _normalize(r.get("name", "")) == norm:
+                    tid = int(r["tvdb_id"])
+                    cache_set(key, tid)
+                    return tid
+            for r in data:
+                for alias in (r.get("aliases") or []):
+                    aname = alias if isinstance(alias, str) else alias.get("name", "")
+                    if _normalize(aname) == norm:
+                        tid = int(r["tvdb_id"])
+                        cache_set(key, tid)
+                        return tid
+            tid = int(data[0]["tvdb_id"])
+            cache_set(key, tid)
+            return tid
+        cache_set(key, 0)
+        return None
+    except Exception:
+        cache_set(key, 0)
+        return None
+
+
+def _tvdb_artwork(tvdb_id: int, content_type: str = "series") -> dict:
+    key = f"tvdb_art_{content_type}_{tvdb_id}"
+    cached = cache_get(key, TVDB_TTL)
+    if cached is not None:
+        return cached
+    result = {"background": "", "logo": ""}
+    endpoint = "movies" if content_type == "movie" else "series"
+    data = _tvdb_get(f"{endpoint}/{tvdb_id}/extended")
+    if not data:
+        cache_set(key, result)
+        return result
+    for a in data.get("artworks", []):
+        url = a.get("image", "")
+        if not url:
+            continue
+        art_type = a.get("type", 0)
+        if art_type in (3, 15) and not result["background"]:
+            result["background"] = url
+        elif art_type == 23 and not result["logo"]:
+            result["logo"] = url
+        if result["background"] and result["logo"]:
+            break
+    cache_set(key, result)
+    return result
+
+
+def _get_tvdb_art(name: str, content_type: str = "series") -> dict:
+    """Get TVDB background + logo for an anime/movie."""
+    if not name:
+        return {"background": "", "logo": ""}
+    tvdb_id = _tvdb_search(name, content_type)
+    if not tvdb_id and content_type == "movie":
+        tvdb_id = _tvdb_search(name, "series")
+        if tvdb_id:
+            return _tvdb_artwork(tvdb_id, "series")
+    if tvdb_id:
+        return _tvdb_artwork(tvdb_id, content_type)
+    return {"background": "", "logo": ""}
+
+
 # ─── Build manifest from server categories ───
 def _build_manifest(series_cats: list[dict], vod_cats: list[dict]) -> dict:
     catalogs = []
@@ -517,6 +640,14 @@ def meta(content_type: str, meta_id: str):
                     {"source": info["youtube_trailer"], "type": "Trailer"}
                 ]
 
+            # TVDB: background + logo
+            anime_name = info.get("name", "")
+            tvdb_art = _get_tvdb_art(anime_name, "series")
+            if tvdb_art.get("background"):
+                result["background"] = tvdb_art["background"]
+            if tvdb_art.get("logo"):
+                result["logo"] = tvdb_art["logo"]
+
             # Episodes — as the server provides them
             videos = []
             if "episodes" in data:
@@ -577,6 +708,13 @@ def meta(content_type: str, meta_id: str):
                 result["releaseInfo"] = str(info["releaseDate"])[:4]
             if info.get("rating"):
                 result["imdbRating"] = str(info["rating"])
+
+            # TVDB: background + logo
+            tvdb_art = _get_tvdb_art(result["name"], "movie")
+            if tvdb_art.get("background"):
+                result["background"] = tvdb_art["background"]
+            if tvdb_art.get("logo"):
+                result["logo"] = tvdb_art["logo"]
 
             return stremio_response({"meta": result})
 
