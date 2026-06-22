@@ -180,10 +180,67 @@ def get_series_info(series_id: str) -> dict:
         data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
         if data:
             cache_set(key, data)
-        return data or {}
+            return data
     except Exception as e:
         print(f"[API] Failed to get series info {series_id}: {e}")
+    # GitHub episodes.json fallback
+    eps_data = _load_episodes_cache()
+    sid = str(series_id)
+    if sid in eps_data:
+        ep_entry = eps_data[sid]
+        episodes = {}
+        for season, eps in ep_entry.get("episodes", {}).items():
+            episodes[season] = []
+            for ep in eps:
+                episodes[season].append({
+                    "episode_num": ep.get("e"),
+                    "stream_id": ep.get("s"),
+                    "container_extension": ep.get("x", "mp4"),
+                    "title": ep.get("t", ""),
+                })
+        result = {
+            "info": {
+                "name": ep_entry.get("name", ""),
+                "cover": ep_entry.get("cover", ""),
+                "plot": ep_entry.get("plot", ""),
+                "genre": ep_entry.get("genre", ""),
+                "rating": ep_entry.get("rating", ""),
+                "releaseDate": ep_entry.get("releaseDate", ""),
+            },
+            "episodes": episodes,
+        }
+        cache_set(key, result)
+        return result
     return {}
+
+
+# Episodes cache from GitHub (loaded once)
+_episodes_cache: dict = {}
+_episodes_cache_ts: float = 0
+
+def _load_episodes_cache() -> dict:
+    global _episodes_cache, _episodes_cache_ts
+    if _episodes_cache and time.time() - _episodes_cache_ts < CACHE_TTL:
+        return _episodes_cache
+    # Try local file first
+    data_dir = Path(__file__).parent / "data"
+    fpath = data_dir / "episodes.json"
+    if fpath.exists():
+        try:
+            with open(fpath) as f:
+                _episodes_cache = json.load(f)
+                _episodes_cache_ts = time.time()
+                print(f"[Cache] Loaded {len(_episodes_cache)} series from local episodes.json")
+                return _episodes_cache
+        except Exception:
+            pass
+    # GitHub fallback
+    data = _load_github_json("episodes.json")
+    if data and isinstance(data, dict):
+        _episodes_cache = data
+        _episodes_cache_ts = time.time()
+        print(f"[Cache] Loaded {len(data)} series from GitHub episodes.json")
+    return _episodes_cache
 
 
 def get_all_vod() -> list[dict]:
