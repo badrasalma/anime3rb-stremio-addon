@@ -113,7 +113,53 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
     return r.json()
 
 
-# ─── Data fetchers (all from server) ───
+# ─── Fallback: load from local/GitHub data files ───
+GITHUB_DATA_URL = os.environ.get(
+    "GITHUB_DATA_URL",
+    "https://raw.githubusercontent.com/badrasalma/anime3rb-stremio-addon/devin/deploy/data"
+)
+DATA_DIR = Path(__file__).parent / "data"
+
+
+def _load_json_fallback(filename: str) -> Any:
+    """Load JSON from local file, then GitHub as fallback."""
+    fpath = DATA_DIR / filename
+    if fpath.exists():
+        try:
+            with open(fpath) as f:
+                data = json.load(f)
+                print(f"[Fallback] Loaded {filename} from local ({type(data).__name__})")
+                return data
+        except Exception:
+            pass
+    try:
+        r = requests.get(f"{GITHUB_DATA_URL}/{filename}", timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        print(f"[Fallback] Loaded {filename} from GitHub ({type(data).__name__})")
+        return data
+    except Exception as e:
+        print(f"[Fallback] Failed to load {filename}: {e}")
+    return None
+
+
+# Episodes cache for series_info fallback
+_episodes_cache: dict = {}
+_episodes_cache_ts: float = 0
+
+
+def _get_episodes_cache() -> dict:
+    global _episodes_cache, _episodes_cache_ts
+    if _episodes_cache and time.time() - _episodes_cache_ts < CACHE_TTL:
+        return _episodes_cache
+    data = _load_json_fallback("episodes.json")
+    if isinstance(data, dict):
+        _episodes_cache = data
+        _episodes_cache_ts = time.time()
+    return _episodes_cache
+
+
+# ─── Data fetchers (server first, fallback to local/GitHub) ───
 def get_series_categories() -> list[dict]:
     cached = cache_get("series_categories")
     if cached is not None:
@@ -125,6 +171,10 @@ def get_series_categories() -> list[dict]:
             return data
     except Exception as e:
         print(f"[API] get_series_categories failed: {e}")
+    data = _load_json_fallback("series_categories.json")
+    if isinstance(data, list):
+        cache_set("series_categories", data)
+        return data
     return []
 
 
@@ -139,6 +189,10 @@ def get_vod_categories() -> list[dict]:
             return data
     except Exception as e:
         print(f"[API] get_vod_categories failed: {e}")
+    data = _load_json_fallback("vod_categories.json")
+    if isinstance(data, list):
+        cache_set("vod_categories", data)
+        return data
     return []
 
 
@@ -153,6 +207,10 @@ def get_all_series() -> list[dict]:
             return data
     except Exception as e:
         print(f"[API] get_series failed: {e}")
+    data = _load_json_fallback("series_list.json")
+    if isinstance(data, list):
+        cache_set("all_series", data)
+        return data
     return []
 
 
@@ -167,6 +225,10 @@ def get_all_vod() -> list[dict]:
             return data
     except Exception as e:
         print(f"[API] get_vod_streams failed: {e}")
+    data = _load_json_fallback("vod_list.json")
+    if isinstance(data, list):
+        cache_set("all_vod", data)
+        return data
     return []
 
 
@@ -182,6 +244,35 @@ def get_series_info(series_id: str) -> dict:
             return data
     except Exception as e:
         print(f"[API] get_series_info {series_id} failed: {e}")
+    # Fallback to episodes.json
+    eps_data = _get_episodes_cache()
+    sid = str(series_id)
+    if sid in eps_data:
+        entry = eps_data[sid]
+        episodes = {}
+        for season, eps in entry.get("episodes", {}).items():
+            episodes[season] = [
+                {
+                    "episode_num": ep.get("e"),
+                    "stream_id": ep.get("s"),
+                    "container_extension": ep.get("x", "mp4"),
+                    "title": ep.get("t", ""),
+                }
+                for ep in eps
+            ]
+        result = {
+            "info": {
+                "name": entry.get("name", ""),
+                "cover": entry.get("cover", ""),
+                "plot": entry.get("plot", ""),
+                "genre": entry.get("genre", ""),
+                "rating": entry.get("rating", ""),
+                "releaseDate": entry.get("releaseDate", ""),
+            },
+            "episodes": episodes,
+        }
+        cache_set(key, result)
+        return result
     return {}
 
 
