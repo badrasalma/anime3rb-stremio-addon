@@ -797,6 +797,49 @@ def health():
     }
 
 
+@app.get("/debug")
+def debug():
+    """Test API connectivity from this server."""
+    url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}&action=get_series_categories"
+    results = {}
+
+    # Test 1: plain requests
+    try:
+        r = requests.get(url, timeout=15)
+        results["plain_requests"] = {"status": r.status_code, "size": len(r.content), "type": r.headers.get("content-type", "")}
+    except Exception as e:
+        results["plain_requests"] = {"error": str(e)}
+
+    # Test 2: cloudscraper
+    try:
+        if cloudscraper:
+            cs = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
+            r = cs.get(url, timeout=15)
+            results["cloudscraper"] = {"status": r.status_code, "size": len(r.content), "type": r.headers.get("content-type", "")}
+            if r.status_code == 200:
+                try:
+                    results["cloudscraper"]["data_count"] = len(r.json())
+                except Exception:
+                    pass
+        else:
+            results["cloudscraper"] = {"error": "not installed"}
+    except Exception as e:
+        results["cloudscraper"] = {"error": str(e)}
+
+    # Test 3: requests with browser-like headers
+    try:
+        r = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        results["browser_headers"] = {"status": r.status_code, "size": len(r.content)}
+    except Exception as e:
+        results["browser_headers"] = {"error": str(e)}
+
+    return results
+
+
 # ─── Background tasks ───
 def _warm_cache() -> None:
     import gc
