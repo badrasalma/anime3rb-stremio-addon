@@ -16,6 +16,10 @@ from pathlib import Path
 
 import requests
 try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
+try:
     import cloudscraper
 except ImportError:
     cloudscraper = None
@@ -31,7 +35,7 @@ TVDB_API_KEY = os.environ.get("TVDB_API_KEY", "962fd58f-6940-4666-8d0c-8d918815f
 _tvdb_token: str = ""
 _tvdb_token_ts: float = 0
 
-# ─── Cloudscraper ───
+# ─── HTTP clients ───
 def _make_scraper():
     if cloudscraper:
         return cloudscraper.create_scraper(
@@ -98,20 +102,32 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
         url += f"&action={action}"
     if extra:
         url += extra
-    for attempt in range(3):
+
+    # Method 1: curl_cffi (Chrome TLS impersonation — best for bypassing Cloudflare)
+    if cffi_requests:
+        try:
+            r = cffi_requests.get(url, impersonate="chrome", timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            print(f"[API] curl_cffi got {r.status_code}")
+        except Exception as e:
+            print(f"[API] curl_cffi failed: {e}")
+
+    # Method 2: cloudscraper
+    for attempt in range(2):
         try:
             if scraper:
                 r = scraper.get(url, timeout=timeout)
                 r.raise_for_status()
                 return r.json()
             else:
-                raise RuntimeError("cloudscraper not available")
+                break
         except Exception as e:
-            print(f"[API] Attempt {attempt+1} failed: {e}")
-            if attempt < 2:
-                time.sleep(2)
+            print(f"[API] cloudscraper attempt {attempt+1} failed: {e}")
+            if attempt < 1:
                 scraper = _make_scraper()
-    # Final fallback
+
+    # Method 3: plain requests (last resort)
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
     return r.json()
@@ -803,39 +819,38 @@ def debug():
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}&action=get_series_categories"
     results = {}
 
-    # Test 1: plain requests
+    # Test 1: curl_cffi (Chrome TLS impersonation)
     try:
-        r = requests.get(url, timeout=15)
-        results["plain_requests"] = {"status": r.status_code, "size": len(r.content), "type": r.headers.get("content-type", "")}
+        if cffi_requests:
+            r = cffi_requests.get(url, impersonate="chrome", timeout=15)
+            results["curl_cffi"] = {"status": r.status_code, "size": len(r.content)}
+            if r.status_code == 200:
+                try:
+                    results["curl_cffi"]["data_count"] = len(r.json())
+                except Exception:
+                    pass
+        else:
+            results["curl_cffi"] = {"error": "not installed"}
     except Exception as e:
-        results["plain_requests"] = {"error": str(e)}
+        results["curl_cffi"] = {"error": str(e)}
 
     # Test 2: cloudscraper
     try:
         if cloudscraper:
             cs = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
             r = cs.get(url, timeout=15)
-            results["cloudscraper"] = {"status": r.status_code, "size": len(r.content), "type": r.headers.get("content-type", "")}
-            if r.status_code == 200:
-                try:
-                    results["cloudscraper"]["data_count"] = len(r.json())
-                except Exception:
-                    pass
+            results["cloudscraper"] = {"status": r.status_code, "size": len(r.content)}
         else:
             results["cloudscraper"] = {"error": "not installed"}
     except Exception as e:
         results["cloudscraper"] = {"error": str(e)}
 
-    # Test 3: requests with browser-like headers
+    # Test 3: plain requests
     try:
-        r = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        results["browser_headers"] = {"status": r.status_code, "size": len(r.content)}
+        r = requests.get(url, timeout=15)
+        results["plain_requests"] = {"status": r.status_code, "size": len(r.content)}
     except Exception as e:
-        results["browser_headers"] = {"error": str(e)}
+        results["plain_requests"] = {"error": str(e)}
 
     return results
 
