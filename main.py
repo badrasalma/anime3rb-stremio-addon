@@ -88,25 +88,58 @@ def cache_set(key: str, val: Any) -> None:
         _evict_if_needed()
 
 
+# ─── GitHub data fallback (for when API is blocked on Render) ───
+GITHUB_DATA_URL = os.environ.get(
+    "GITHUB_DATA_URL",
+    "https://raw.githubusercontent.com/badrasalma/anime3rb-stremio-addon/devin/deploy/data"
+)
+
+def _load_github_json(filename: str) -> Any:
+    url = f"{GITHUB_DATA_URL}/{filename}"
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[GitHub] Failed to load {filename}: {e}")
+        return None
+
+
 # ─── Xtream API ───
+def _make_scraper():
+    if cloudscraper:
+        return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
+    return None
+
+
 def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
+    global scraper
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
     if action:
         url += f"&action={action}"
     if extra:
         url += extra
+    for attempt in range(3):
+        try:
+            if scraper:
+                r = scraper.get(url, timeout=timeout)
+                r.raise_for_status()
+                return r.json()
+            else:
+                raise RuntimeError("cloudscraper not available")
+        except Exception as e:
+            print(f"[API] Attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                time.sleep(3)
+                scraper = _make_scraper()  # Re-init scraper
+    # Final fallback: plain requests
     try:
-        if scraper:
-            r = scraper.get(url, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        else:
-            raise RuntimeError("cloudscraper not available")
-    except Exception as e:
-        print(f"[API] cloudscraper failed: {e}, trying requests...")
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
         return r.json()
+    except Exception as e:
+        print(f"[API] All attempts failed: {e}")
+        raise
 
 
 def get_series_categories() -> list[dict]:
@@ -123,10 +156,19 @@ def get_all_series() -> list[dict]:
     cached = cache_get("all_series")
     if cached:
         return cached
-    data = api_call("get_series", timeout=90)
+    try:
+        data = api_call("get_series", timeout=90)
+        if isinstance(data, list):
+            cache_set("all_series", data)
+            return data
+    except Exception as e:
+        print(f"[API] get_series failed, trying GitHub fallback: {e}")
+    # GitHub fallback
+    data = _load_github_json("series_list.json")
     if isinstance(data, list):
         cache_set("all_series", data)
-    return data if isinstance(data, list) else []
+        return data
+    return []
 
 
 def get_series_info(series_id: str) -> dict:
@@ -148,10 +190,14 @@ def get_all_vod() -> list[dict]:
     cached = cache_get("all_vod")
     if cached:
         return cached
-    data = api_call("get_vod_streams", timeout=90)
-    if isinstance(data, list):
-        cache_set("all_vod", data)
-    return data if isinstance(data, list) else []
+    try:
+        data = api_call("get_vod_streams", timeout=90)
+        if isinstance(data, list):
+            cache_set("all_vod", data)
+            return data
+    except Exception as e:
+        print(f"[API] get_vod_streams failed: {e}")
+    return []
 
 
 def get_vod_info(vod_id: str) -> dict:
