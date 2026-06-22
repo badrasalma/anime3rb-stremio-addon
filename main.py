@@ -1,11 +1,10 @@
-"""Anime3rb Stremio Addon — Full IPTV with catalogs, meta, streams + TVDB artwork.
+"""Anime3rb Stremio IPTV Addon.
 
-Fetches everything LIVE from anime3rb.vip Xtream API.
-TVDB provides backgrounds and logos for all anime.
+Fetches everything directly from the anime3rb Xtream API as-is.
+Categories, series, episodes, movies — all from the source.
 """
 import json
 import os
-import re
 import sys
 import time
 import threading
@@ -27,23 +26,21 @@ from fastapi.middleware.cors import CORSMiddleware
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
 USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
 PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
-TVDB_API_KEY = os.environ.get("TVDB_API_KEY", "962fd58f-6940-4666-8d0c-8d918815ffba")
 
-_tvdb_token: str = ""
-_tvdb_token_ts: float = 0
+# ─── Cloudscraper ───
+def _make_scraper():
+    if cloudscraper:
+        return cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "linux"}
+        )
+    return None
 
-# ─── Cloudscraper session ───
-scraper = (
-    cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
-    if cloudscraper else None
-)
+scraper = _make_scraper()
 
-# ─── Cache ───
-CACHE_TTL = 6 * 60 * 60        # 6 hours for catalog lists
-SERIES_INFO_TTL = 12 * 60 * 60  # 12 hours for episode data
-TVDB_TTL = 24 * 60 * 60         # 24 hours for TVDB lookups
+# ─── In-memory cache ───
+CACHE_TTL = 6 * 60 * 60
+SERIES_INFO_TTL = 1 * 60 * 60
 MAX_CACHE_MB = 60
-PROTECTED_KEYS = {"series_categories", "all_series", "all_vod"}
 
 _cache: OrderedDict[str, Any] = OrderedDict()
 _cache_ts: dict[str, float] = {}
@@ -61,9 +58,10 @@ def _cache_size_mb() -> float:
 
 
 def _evict_if_needed() -> None:
-    while _cache_size_mb() > MAX_CACHE_MB and len(_cache) > len(PROTECTED_KEYS):
+    protected = {"all_series", "all_vod", "series_categories", "vod_categories"}
+    while _cache_size_mb() > MAX_CACHE_MB and len(_cache) > len(protected):
         for key in list(_cache.keys()):
-            if key not in PROTECTED_KEYS:
+            if key not in protected:
                 _cache.pop(key, None)
                 _cache_ts.pop(key, None)
                 break
@@ -88,30 +86,7 @@ def cache_set(key: str, val: Any) -> None:
         _evict_if_needed()
 
 
-# ─── GitHub data fallback (for when API is blocked on Render) ───
-GITHUB_DATA_URL = os.environ.get(
-    "GITHUB_DATA_URL",
-    "https://raw.githubusercontent.com/badrasalma/anime3rb-stremio-addon/devin/deploy/data"
-)
-
-def _load_github_json(filename: str) -> Any:
-    url = f"{GITHUB_DATA_URL}/{filename}"
-    try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[GitHub] Failed to load {filename}: {e}")
-        return None
-
-
 # ─── Xtream API ───
-def _make_scraper():
-    if cloudscraper:
-        return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
-    return None
-
-
 def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
     global scraper
     url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}"
@@ -130,31 +105,46 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60) -> Any:
         except Exception as e:
             print(f"[API] Attempt {attempt+1} failed: {e}")
             if attempt < 2:
-                time.sleep(3)
-                scraper = _make_scraper()  # Re-init scraper
-    # Final fallback: plain requests
-    try:
-        r = requests.get(url, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[API] All attempts failed: {e}")
-        raise
+                time.sleep(2)
+                scraper = _make_scraper()
+    # Final fallback
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 
+# ─── Data fetchers (all from server) ───
 def get_series_categories() -> list[dict]:
     cached = cache_get("series_categories")
-    if cached:
+    if cached is not None:
         return cached
-    data = api_call("get_series_categories")
-    if isinstance(data, list):
-        cache_set("series_categories", data)
-    return data if isinstance(data, list) else []
+    try:
+        data = api_call("get_series_categories")
+        if isinstance(data, list):
+            cache_set("series_categories", data)
+            return data
+    except Exception as e:
+        print(f"[API] get_series_categories failed: {e}")
+    return []
+
+
+def get_vod_categories() -> list[dict]:
+    cached = cache_get("vod_categories")
+    if cached is not None:
+        return cached
+    try:
+        data = api_call("get_vod_categories")
+        if isinstance(data, list):
+            cache_set("vod_categories", data)
+            return data
+    except Exception as e:
+        print(f"[API] get_vod_categories failed: {e}")
+    return []
 
 
 def get_all_series() -> list[dict]:
     cached = cache_get("all_series")
-    if cached:
+    if cached is not None:
         return cached
     try:
         data = api_call("get_series", timeout=90)
@@ -162,90 +152,13 @@ def get_all_series() -> list[dict]:
             cache_set("all_series", data)
             return data
     except Exception as e:
-        print(f"[API] get_series failed, trying GitHub fallback: {e}")
-    # GitHub fallback
-    data = _load_github_json("series_list.json")
-    if isinstance(data, list):
-        cache_set("all_series", data)
-        return data
+        print(f"[API] get_series failed: {e}")
     return []
-
-
-def get_series_info(series_id: str) -> dict:
-    key = f"series_info_{series_id}"
-    cached = cache_get(key, SERIES_INFO_TTL)
-    if cached:
-        return cached
-    try:
-        data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
-        if data:
-            cache_set(key, data)
-            return data
-    except Exception as e:
-        print(f"[API] Failed to get series info {series_id}: {e}")
-    # GitHub episodes.json fallback
-    eps_data = _load_episodes_cache()
-    sid = str(series_id)
-    if sid in eps_data:
-        ep_entry = eps_data[sid]
-        episodes = {}
-        for season, eps in ep_entry.get("episodes", {}).items():
-            episodes[season] = []
-            for ep in eps:
-                episodes[season].append({
-                    "episode_num": ep.get("e"),
-                    "stream_id": ep.get("s"),
-                    "container_extension": ep.get("x", "mp4"),
-                    "title": ep.get("t", ""),
-                })
-        result = {
-            "info": {
-                "name": ep_entry.get("name", ""),
-                "cover": ep_entry.get("cover", ""),
-                "plot": ep_entry.get("plot", ""),
-                "genre": ep_entry.get("genre", ""),
-                "rating": ep_entry.get("rating", ""),
-                "releaseDate": ep_entry.get("releaseDate", ""),
-            },
-            "episodes": episodes,
-        }
-        cache_set(key, result)
-        return result
-    return {}
-
-
-# Episodes cache from GitHub (loaded once)
-_episodes_cache: dict = {}
-_episodes_cache_ts: float = 0
-
-def _load_episodes_cache() -> dict:
-    global _episodes_cache, _episodes_cache_ts
-    if _episodes_cache and time.time() - _episodes_cache_ts < CACHE_TTL:
-        return _episodes_cache
-    # Try local file first
-    data_dir = Path(__file__).parent / "data"
-    fpath = data_dir / "episodes.json"
-    if fpath.exists():
-        try:
-            with open(fpath) as f:
-                _episodes_cache = json.load(f)
-                _episodes_cache_ts = time.time()
-                print(f"[Cache] Loaded {len(_episodes_cache)} series from local episodes.json")
-                return _episodes_cache
-        except Exception:
-            pass
-    # GitHub fallback
-    data = _load_github_json("episodes.json")
-    if data and isinstance(data, dict):
-        _episodes_cache = data
-        _episodes_cache_ts = time.time()
-        print(f"[Cache] Loaded {len(data)} series from GitHub episodes.json")
-    return _episodes_cache
 
 
 def get_all_vod() -> list[dict]:
     cached = cache_get("all_vod")
-    if cached:
+    if cached is not None:
         return cached
     try:
         data = api_call("get_vod_streams", timeout=90)
@@ -257,417 +170,116 @@ def get_all_vod() -> list[dict]:
     return []
 
 
+def get_series_info(series_id: str) -> dict:
+    key = f"series_info_{series_id}"
+    cached = cache_get(key, SERIES_INFO_TTL)
+    if cached is not None:
+        return cached
+    try:
+        data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
+        if data:
+            cache_set(key, data)
+            return data
+    except Exception as e:
+        print(f"[API] get_series_info {series_id} failed: {e}")
+    return {}
+
+
 def get_vod_info(vod_id: str) -> dict:
     key = f"vod_info_{vod_id}"
     cached = cache_get(key, SERIES_INFO_TTL)
-    if cached:
+    if cached is not None:
         return cached
     try:
         data = api_call("get_vod_info", f"&vod_id={vod_id}", timeout=60)
         if data:
             cache_set(key, data)
-        return data or {}
+            return data
     except Exception as e:
-        print(f"[API] Failed to get VOD info {vod_id}: {e}")
+        print(f"[API] get_vod_info {vod_id} failed: {e}")
     return {}
 
 
-# ─── TVDB API ───
-def _tvdb_login() -> str:
-    global _tvdb_token, _tvdb_token_ts
-    if _tvdb_token and (time.time() - _tvdb_token_ts) < 25 * 24 * 3600:
-        return _tvdb_token
-    try:
-        r = requests.post(
-            "https://api4.thetvdb.com/v4/login",
-            json={"apikey": TVDB_API_KEY},
-            timeout=10,
-        )
-        r.raise_for_status()
-        _tvdb_token = r.json().get("data", {}).get("token", "")
-        _tvdb_token_ts = time.time()
-        print("[TVDB] Logged in successfully")
-        return _tvdb_token
-    except Exception as e:
-        print(f"[TVDB] Login error: {e}")
-        return ""
+# ─── Build manifest from server categories ───
+def _build_manifest(series_cats: list[dict], vod_cats: list[dict]) -> dict:
+    catalogs = []
 
-
-def _tvdb_get(path: str) -> dict | None:
-    token = _tvdb_login()
-    if not token:
-        return None
-    try:
-        r = requests.get(
-            f"https://api4.thetvdb.com/v4/{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json().get("data")
-    except Exception:
-        return None
-
-
-def _normalize(text: str) -> str:
-    return re.sub(r'[^\w\s]', ' ', text.lower()).strip()
-
-
-def _tvdb_search(anime_name: str, content_type: str = "series") -> int | None:
-    tvdb_type = "movie" if content_type == "movie" else "series"
-    key = f"tvdb_id_{tvdb_type}_{_normalize(anime_name)}"
-    cached = cache_get(key, TVDB_TTL)
-    if cached is not None:
-        return cached if cached != 0 else None
-    try:
-        encoded = requests.utils.quote(anime_name)
-        data = _tvdb_get(f"search?query={encoded}&type={tvdb_type}")
-        if not data and tvdb_type == "movie":
-            data = _tvdb_get(f"search?query={encoded}")
-        if data:
-            norm_name = _normalize(anime_name)
-            for r in data:
-                if _normalize(r.get("name", "")) == norm_name:
-                    tvdb_id = int(r["tvdb_id"])
-                    cache_set(key, tvdb_id)
-                    return tvdb_id
-            for r in data:
-                aliases = r.get("aliases", [])
-                if isinstance(aliases, list):
-                    for alias in aliases:
-                        alias_name = alias if isinstance(alias, str) else alias.get("name", "")
-                        if _normalize(alias_name) == norm_name:
-                            tvdb_id = int(r["tvdb_id"])
-                            cache_set(key, tvdb_id)
-                            return tvdb_id
-            tvdb_id = int(data[0]["tvdb_id"])
-            cache_set(key, tvdb_id)
-            return tvdb_id
-        cache_set(key, 0)
-        return None
-    except Exception:
-        cache_set(key, 0)
-        return None
-
-
-def _tvdb_artwork(tvdb_id: int, content_type: str = "series") -> dict:
-    key = f"tvdb_art_{content_type}_{tvdb_id}"
-    cached = cache_get(key, TVDB_TTL)
-    if cached is not None:
-        return cached
-    result = {"poster": "", "background": "", "logo": ""}
-    endpoint = "movies" if content_type == "movie" else "series"
-    data = _tvdb_get(f"{endpoint}/{tvdb_id}/extended")
-    if not data:
-        cache_set(key, result)
-        return result
-    artworks = data.get("artworks", [])
-    for a in artworks:
-        url = a.get("image", "")
-        if not url:
-            continue
-        art_type = a.get("type", 0)
-        if art_type in (2, 14) and not result["poster"]:
-            result["poster"] = url
-        elif art_type in (3, 15) and not result["background"]:
-            result["background"] = url
-        elif art_type == 23 and not result["logo"]:
-            result["logo"] = url
-        if all(result.values()):
-            break
-    cache_set(key, result)
-    return result
-
-
-def _get_tvdb_art(name: str, content_type: str = "series") -> dict:
-    """Get TVDB artwork for an anime by name. Returns {poster, background, logo}."""
-    if not name:
-        return {"poster": "", "background": "", "logo": ""}
-    tvdb_id = _tvdb_search(name, content_type)
-    if not tvdb_id and content_type == "movie":
-        tvdb_id = _tvdb_search(name, "series")
-        if tvdb_id:
-            return _tvdb_artwork(tvdb_id, "series")
-    if tvdb_id:
-        return _tvdb_artwork(tvdb_id, content_type)
-    return {"poster": "", "background": "", "logo": ""}
-
-
-# ─── Search helpers ───
-_SEARCH_ALIASES: dict[str, list[str]] = {
-    "seven deadly sins": ["nanatsu no taizai"],
-    "attack on titan": ["shingeki no kyojin"],
-    "demon slayer": ["kimetsu no yaiba"],
-    "my hero academia": ["boku no hero academia"],
-    "hunter x hunter": ["hunter x hunter"],
-    "one punch man": ["one punch man"],
-    "sword art online": ["sword art online"],
-    "black clover": ["black clover"],
-    "tokyo ghoul": ["tokyo ghoul"],
-    "death note": ["death note"],
-    "fullmetal alchemist": ["fullmetal alchemist", "hagane no renkinjutsushi"],
-    "detective conan": ["meitantei conan"],
-    "case closed": ["meitantei conan"],
-    "dragon ball": ["dragon ball"],
-    "fairy tail": ["fairy tail"],
-    "bleach": ["bleach"],
-    "naruto": ["naruto"],
-    "jujutsu kaisen": ["jujutsu kaisen"],
-    "spy x family": ["spy x family"],
-    "chainsaw man": ["chainsaw man"],
-    "one piece": ["one piece"],
-    "blue lock": ["blue lock"],
-    "vinland saga": ["vinland saga"],
-    "the rising of the shield hero": ["tate no yuusha no nariagari"],
-    "shield hero": ["tate no yuusha no nariagari"],
-    "re zero": ["re:zero", "rezero"],
-    "konosuba": ["kono subarashii"],
-    "classroom of the elite": ["youkoso jitsuryoku"],
-    "that time i got reincarnated as a slime": ["tensei shitara slime datta ken"],
-    "mushoku tensei": ["mushoku tensei"],
-    "solo leveling": ["ore dake level up"],
-    "mob psycho": ["mob psycho"],
-    "tower of god": ["kami no tou"],
-    "overlord": ["overlord"],
-    "no game no life": ["no game no life"],
-    "steins gate": ["steins;gate", "steins gate"],
-    "الخطايا السبع": ["nanatsu no taizai"],
-    "هجوم العمالقة": ["shingeki no kyojin"],
-    "قاتل الشياطين": ["kimetsu no yaiba"],
-    "بطلي الأكاديمي": ["boku no hero academia"],
-    "القناص": ["hunter x hunter"],
-    "ون بيس": ["one piece"],
-    "ناروتو": ["naruto"],
-    "بليتش": ["bleach"],
-    "المحقق كونان": ["meitantei conan"],
-    "كونان": ["meitantei conan"],
-    "دراغون بول": ["dragon ball"],
-    "مذكرة الموت": ["death note"],
-    "طوكيو غول": ["tokyo ghoul"],
-    "جوجوتسو كايسن": ["jujutsu kaisen"],
-    "البرسيم الأسود": ["black clover"],
-    "ذيل الجنية": ["fairy tail"],
-    "سورد ارت": ["sword art online"],
-    "بلو لوك": ["blue lock"],
-    "فينلاند ساغا": ["vinland saga"],
-    "موشوكو تنسي": ["mushoku tensei"],
-    "صعود المستوى": ["ore dake level up"],
-    "برج الإله": ["kami no tou"],
-}
-
-
-def _expand_search(query: str) -> list[str]:
-    queries = [query]
-    q_lower = query.lower().strip()
-    for eng, aliases in _SEARCH_ALIASES.items():
-        if eng in q_lower or q_lower in eng:
-            queries.extend(aliases)
-    return queries
-
-
-def _search_score(query: str, name: str, plot: str) -> float:
-    q = query.lower().strip()
-    name_lower = name.lower()
-    plot_lower = plot.lower() if plot else ""
-    if q == name_lower:
-        return 100.0
-    if q in name_lower:
-        return 90.0
-    if name_lower.startswith(q):
-        return 85.0
-    words = q.split()
-    if words and all(w in name_lower for w in words):
-        return 80.0
-    combined = name_lower + " " + plot_lower
-    if words and all(w in combined for w in words):
-        return 60.0
-    if len(words) >= 2:
-        hits = sum(1 for w in words if w in name_lower)
-        ratio = hits / len(words)
-        if ratio >= 0.5:
-            return 40.0 * ratio
-    if len(words) == 1 and len(q) >= 3 and q in name_lower:
-        return 50.0
-    return 0.0
-
-
-def _safe_int(val, default: int = 0) -> int:
-    if isinstance(val, int):
-        return val
-    s = str(val).strip()
-    if not s:
-        return default
-    m = re.match(r'(\d+)', s)
-    return int(m.group(1)) if m else default
-
-
-# ─── Genre catalog mapping ───
-_GENRE_CATALOGS = {
-    "anime3rb_action": "أكشن",
-    "anime3rb_comedy": "كوميدي",
-    "anime3rb_fantasy": "خيال",
-    "anime3rb_shounen": "شونين",
-    "anime3rb_adventure": "مغامرة",
-    "anime3rb_drama": "دراما",
-    "anime3rb_scifi": "خيال علمي",
-    "anime3rb_seinen": "سينين",
-    "anime3rb_supernatural": "خارق للطبيعة",
-    "anime3rb_mystery": "غموض",
-    "anime3rb_isekai": "إيسيكاي",
-    "anime3rb_mecha": "ميكا",
-    "anime3rb_thriller": "تشويق",
-}
-
-
-# ─── Stremio Manifest ───
-MANIFEST = {
-    "id": "com.anime3rb.xtream",
-    "version": "4.0.0",
-    "name": "Anime3rb أنمي",
-    "description": "مشاهدة الأنمي والأفلام من anime3rb.vip — كتالوجات + بث مباشر من المصدر + خلفيات ولوغو TVDB",
-    "logo": "https://anime3rb.vip/favicon.ico",
-    "resources": [
-        "catalog",
-        {
-            "name": "meta",
-            "types": ["series", "movie"],
-            "idPrefixes": ["anime3rb_"],
-        },
-        {
-            "name": "stream",
-            "types": ["series", "movie"],
-            "idPrefixes": ["anime3rb_"],
-        },
-    ],
-    "types": ["series", "movie"],
-    "catalogs": [
-        {
+    # One catalog per series category (from server)
+    for cat in series_cats:
+        cid = cat.get("category_id", "")
+        cname = cat.get("category_name", "")
+        catalogs.append({
             "type": "series",
-            "id": "anime3rb_series",
-            "name": "مسلسلات الأنمي",
+            "id": f"anime3rb_series_{cid}",
+            "name": cname,
             "extra": [
                 {"name": "search", "isRequired": False},
                 {"name": "skip", "isRequired": False},
             ],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_new",
-            "name": "أنمي - جديد",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_trending",
-            "name": "أنمي - الشائع",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_top_rated",
-            "name": "أنمي - Top Rated",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_action",
-            "name": "أنمي - أكشن",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_comedy",
-            "name": "أنمي - كوميدي",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_fantasy",
-            "name": "أنمي - خيال",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_shounen",
-            "name": "أنمي - شونين",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_adventure",
-            "name": "أنمي - مغامرة",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_drama",
-            "name": "أنمي - دراما",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_scifi",
-            "name": "أنمي - خيال علمي",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_seinen",
-            "name": "أنمي - سينين",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_supernatural",
-            "name": "أنمي - خارق للطبيعة",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_mystery",
-            "name": "أنمي - غموض",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_isekai",
-            "name": "أنمي - إيسيكاي",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_mecha",
-            "name": "أنمي - ميكا",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
-            "type": "series",
-            "id": "anime3rb_thriller",
-            "name": "أنمي - تشويق",
-            "extra": [{"name": "skip", "isRequired": False}],
-        },
-        {
+        })
+
+    # One catalog per VOD category (from server)
+    for cat in vod_cats:
+        cid = cat.get("category_id", "")
+        cname = cat.get("category_name", "")
+        catalogs.append({
             "type": "movie",
-            "id": "anime3rb_movies",
-            "name": "أفلام الأنمي",
+            "id": f"anime3rb_vod_{cid}",
+            "name": cname,
             "extra": [
                 {"name": "search", "isRequired": False},
                 {"name": "skip", "isRequired": False},
             ],
-        },
-    ],
-    "behaviorHints": {"configurable": False},
-}
+        })
+
+    return {
+        "id": "com.anime3rb.iptv",
+        "version": "5.0.0",
+        "name": "Anime3rb أنمي",
+        "description": "أنمي عرب — IPTV",
+        "logo": "https://anime3rb.vip/favicon.ico",
+        "resources": [
+            "catalog",
+            {
+                "name": "meta",
+                "types": ["series", "movie"],
+                "idPrefixes": ["anime3rb_"],
+            },
+            {
+                "name": "stream",
+                "types": ["series", "movie"],
+                "idPrefixes": ["anime3rb_"],
+            },
+        ],
+        "types": ["series", "movie"],
+        "catalogs": catalogs,
+        "behaviorHints": {"configurable": False},
+    }
 
 
-# ─── FastAPI App ───
-app = FastAPI(title="Anime3rb Stremio Addon")
+# ─── FastAPI ───
+app = FastAPI(title="Anime3rb IPTV Addon")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Manifest is built dynamically from server categories
+_manifest: dict | None = None
+_manifest_ts: float = 0
+
+
+def _get_manifest() -> dict:
+    global _manifest, _manifest_ts
+    if _manifest and time.time() - _manifest_ts < CACHE_TTL:
+        return _manifest
+    series_cats = get_series_categories()
+    vod_cats = get_vod_categories()
+    _manifest = _build_manifest(series_cats, vod_cats)
+    _manifest_ts = time.time()
+    return _manifest
 
 
 def stremio_response(data: dict) -> Response:
@@ -682,60 +294,21 @@ def stremio_response(data: dict) -> Response:
     )
 
 
-# ─── Catalog helpers ───
-def _build_series_metas(series_list: list, skip: int = 0) -> list:
-    page = series_list[skip : skip + 100]
-    metas = []
-    for s in page:
-        sid = str(s["series_id"])
-        meta: dict[str, Any] = {
-            "id": f"anime3rb_series_{sid}",
-            "type": "series",
-            "name": s.get("name", ""),
-            "posterShape": "poster",
-        }
-        if s.get("cover"):
-            meta["poster"] = s["cover"]
-        if s.get("plot"):
-            meta["description"] = s["plot"]
-        if s.get("genre"):
-            meta["genres"] = [g.strip() for g in s["genre"].split(",")]
-        if s.get("releaseDate"):
-            meta["releaseInfo"] = s["releaseDate"][:4]
-        if s.get("rating"):
-            meta["imdbRating"] = s["rating"]
-        metas.append(meta)
-    return metas
-
-
-def _build_vod_metas(vod_list: list, skip: int = 0) -> list:
-    page = vod_list[skip : skip + 100]
-    metas = []
-    for v in page:
-        meta: dict[str, Any] = {
-            "id": f"anime3rb_vod_{v.get('stream_id', '')}",
-            "type": "movie",
-            "name": v.get("name", ""),
-            "posterShape": "poster",
-        }
-        if v.get("stream_icon") or v.get("cover"):
-            meta["poster"] = v.get("stream_icon") or v.get("cover")
-        if v.get("plot"):
-            meta["description"] = v["plot"]
-        if v.get("genre"):
-            meta["genres"] = [g.strip() for g in v["genre"].split(",")]
-        if v.get("releaseDate"):
-            meta["releaseInfo"] = v["releaseDate"][:4]
-        if v.get("rating"):
-            meta["imdbRating"] = v["rating"]
-        metas.append(meta)
-    return metas
+def _safe_int(val, default: int = 0) -> int:
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    if not s:
+        return default
+    import re
+    m = re.match(r'(\d+)', s)
+    return int(m.group(1)) if m else default
 
 
 # ─── Routes ───
 @app.get("/manifest.json")
 def manifest():
-    return stremio_response(MANIFEST)
+    return stremio_response(_get_manifest())
 
 
 @app.get("/catalog/{content_type}/{catalog_id}.json")
@@ -747,106 +320,76 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
             if "=" in part:
                 k, v = part.split("=", 1)
                 extras[k] = v
+    skip = int(extras.get("skip", 0))
+    search_q = unquote(extras["search"]).lower().strip() if extras.get("search") else ""
 
     try:
-        # ── Series catalogs ──
-        if content_type == "series":
-            if catalog_id == "anime3rb_series":
-                series = get_all_series()
-                if not isinstance(series, list):
-                    return stremio_response({"metas": []})
-                if extras.get("search"):
-                    raw_q = unquote(extras["search"])
-                    queries = _expand_search(raw_q)
-                    scored: dict[str, tuple[float, dict]] = {}
-                    for q in queries:
-                        for s in series:
-                            sid = str(s.get("series_id", ""))
-                            score = _search_score(q, s.get("name", ""), s.get("plot", ""))
-                            if score > 0 and (sid not in scored or score > scored[sid][0]):
-                                scored[sid] = (score, s)
-                    ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)
-                    series = [s for _, s in ranked]
-                skip = int(extras.get("skip", 0))
-                return stremio_response({"metas": _build_series_metas(series, skip)})
-
-            if catalog_id == "anime3rb_new":
-                series = get_all_series()
-                if not isinstance(series, list):
-                    return stremio_response({"metas": []})
-                series = sorted(
-                    [s for s in series if s.get("releaseDate")],
-                    key=lambda s: s.get("releaseDate", ""),
-                    reverse=True,
-                )
-                skip = int(extras.get("skip", 0))
-                return stremio_response({"metas": _build_series_metas(series, skip)})
-
-            if catalog_id == "anime3rb_trending":
-                series = get_all_series()
-                if not isinstance(series, list):
-                    return stremio_response({"metas": []})
-                series = [s for s in series if s.get("releaseDate") and s.get("rating")]
-                series = sorted(
-                    series,
-                    key=lambda s: (s.get("releaseDate", ""), float(s.get("rating", 0) or 0)),
-                    reverse=True,
-                )
-                skip = int(extras.get("skip", 0))
-                return stremio_response({"metas": _build_series_metas(series, skip)})
-
-            if catalog_id == "anime3rb_top_rated":
-                series = get_all_series()
-                if not isinstance(series, list):
-                    return stremio_response({"metas": []})
-                series = sorted(
-                    [s for s in series if s.get("rating")],
-                    key=lambda s: float(s.get("rating", 0) or 0),
-                    reverse=True,
-                )
-                skip = int(extras.get("skip", 0))
-                return stremio_response({"metas": _build_series_metas(series, skip)})
-
-            if catalog_id in _GENRE_CATALOGS:
-                genre_name = _GENRE_CATALOGS[catalog_id]
-                series = get_all_series()
-                if not isinstance(series, list):
-                    return stremio_response({"metas": []})
+        # ── Series catalog ──
+        if content_type == "series" and catalog_id.startswith("anime3rb_series_"):
+            cat_id = catalog_id.replace("anime3rb_series_", "")
+            all_series = get_all_series()
+            # Filter by category
+            series = [s for s in all_series if str(s.get("category_id")) == cat_id]
+            # Search
+            if search_q:
                 series = [
                     s for s in series
-                    if genre_name in [g.strip() for g in (s.get("genre") or "").split(",")]
+                    if search_q in (s.get("name") or "").lower()
+                    or search_q in (s.get("plot") or "").lower()
                 ]
-                series = sorted(
-                    series,
-                    key=lambda s: float(s.get("rating", 0) or 0),
-                    reverse=True,
-                )
-                skip = int(extras.get("skip", 0))
-                return stremio_response({"metas": _build_series_metas(series, skip)})
+            # Paginate
+            page = series[skip : skip + 100]
+            metas = []
+            for s in page:
+                sid = str(s.get("series_id", ""))
+                meta: dict[str, Any] = {
+                    "id": f"anime3rb_s_{sid}",
+                    "type": "series",
+                    "name": s.get("name", ""),
+                    "posterShape": "poster",
+                }
+                if s.get("cover"):
+                    meta["poster"] = s["cover"]
+                if s.get("plot"):
+                    meta["description"] = s["plot"]
+                if s.get("genre"):
+                    meta["genres"] = [g.strip() for g in s["genre"].split(",") if g.strip()]
+                if s.get("releaseDate"):
+                    meta["releaseInfo"] = str(s["releaseDate"])[:4]
+                if s.get("rating"):
+                    meta["imdbRating"] = str(s["rating"])
+                metas.append(meta)
+            return stremio_response({"metas": metas})
 
-        # ── Movie catalog ──
-        if content_type == "movie" and catalog_id == "anime3rb_movies":
-            vod = get_all_vod()
-            if not isinstance(vod, list):
-                return stremio_response({"metas": []})
-            if extras.get("search"):
-                raw_q = unquote(extras["search"])
-                queries = _expand_search(raw_q)
-                vod_scored: dict[str, tuple[float, dict]] = {}
-                for q in queries:
-                    for v in vod:
-                        vid = str(v.get("stream_id", ""))
-                        score = _search_score(q, v.get("name", ""), v.get("plot", ""))
-                        if score > 0 and (vid not in vod_scored or score > vod_scored[vid][0]):
-                            vod_scored[vid] = (score, v)
-                ranked = sorted(vod_scored.values(), key=lambda x: x[0], reverse=True)
-                vod = [v for _, v in ranked]
-            skip = int(extras.get("skip", 0))
-            return stremio_response({"metas": _build_vod_metas(vod, skip)})
+        # ── VOD catalog ──
+        if content_type == "movie" and catalog_id.startswith("anime3rb_vod_"):
+            cat_id = catalog_id.replace("anime3rb_vod_", "")
+            all_vod = get_all_vod()
+            vod = [v for v in all_vod if str(v.get("category_id")) == cat_id]
+            if search_q:
+                vod = [
+                    v for v in vod
+                    if search_q in (v.get("name") or "").lower()
+                ]
+            page = vod[skip : skip + 100]
+            metas = []
+            for v in page:
+                vid = str(v.get("stream_id", ""))
+                meta: dict[str, Any] = {
+                    "id": f"anime3rb_v_{vid}",
+                    "type": "movie",
+                    "name": v.get("name", ""),
+                    "posterShape": "poster",
+                }
+                if v.get("stream_icon"):
+                    meta["poster"] = v["stream_icon"]
+                if v.get("rating"):
+                    meta["imdbRating"] = str(v["rating"])
+                metas.append(meta)
+            return stremio_response({"metas": metas})
 
     except Exception as e:
         print(f"[Catalog] Error: {e}")
-
     return stremio_response({"metas": []})
 
 
@@ -854,13 +397,13 @@ def catalog(content_type: str, catalog_id: str, extra_params: str = ""):
 def meta(content_type: str, meta_id: str):
     try:
         # ── Series meta ──
-        if content_type == "series" and meta_id.startswith("anime3rb_series_"):
-            series_id = meta_id.replace("anime3rb_series_", "")
+        if content_type == "series" and meta_id.startswith("anime3rb_s_"):
+            series_id = meta_id.replace("anime3rb_s_", "")
             data = get_series_info(series_id)
-            if not data or "info" not in data:
+            if not data:
                 return stremio_response({"meta": None})
 
-            info = data["info"]
+            info = data.get("info", {})
             result: dict[str, Any] = {
                 "id": meta_id,
                 "type": "series",
@@ -873,41 +416,29 @@ def meta(content_type: str, meta_id: str):
             if info.get("plot"):
                 result["description"] = info["plot"]
             if info.get("genre"):
-                result["genres"] = [g.strip() for g in info["genre"].split(",")]
+                result["genres"] = [g.strip() for g in info["genre"].split(",") if g.strip()]
             if info.get("releaseDate"):
-                result["releaseInfo"] = info["releaseDate"][:4]
+                result["releaseInfo"] = str(info["releaseDate"])[:4]
             if info.get("rating"):
-                result["imdbRating"] = info["rating"]
+                result["imdbRating"] = str(info["rating"])
             if info.get("youtube_trailer"):
                 result["trailers"] = [
                     {"source": info["youtube_trailer"], "type": "Trailer"}
                 ]
 
-            # TVDB artwork: background + logo for every anime
-            anime_name = info.get("name", "")
-            tvdb_art = _get_tvdb_art(anime_name, "series")
-            if tvdb_art.get("background"):
-                result["background"] = tvdb_art["background"]
-            if tvdb_art.get("logo"):
-                result["logo"] = tvdb_art["logo"]
-            if tvdb_art.get("poster"):
-                result["poster"] = tvdb_art["poster"]
-
-            # Build episode list (LIVE from API — always up to date)
+            # Episodes — as the server provides them
             videos = []
-            cover = info.get("cover", "")
             if "episodes" in data:
                 for season_num, episodes in data["episodes"].items():
                     for ep in episodes:
-                        ep_num_raw = ep.get("episode_num", "")
                         vid: dict[str, Any] = {
-                            "id": f"anime3rb_series_{series_id}:{season_num}:{ep_num_raw}",
-                            "title": ep.get("title", f"الحلقة {ep_num_raw}"),
+                            "id": f"anime3rb_s_{series_id}:{season_num}:{ep.get('episode_num', '')}",
+                            "title": ep.get("title", ""),
                             "season": _safe_int(season_num),
-                            "episode": _safe_int(ep_num_raw),
+                            "episode": _safe_int(ep.get("episode_num", "")),
                         }
-                        if cover:
-                            vid["thumbnail"] = cover
+                        if info.get("cover"):
+                            vid["thumbnail"] = info["cover"]
                         if ep.get("added"):
                             try:
                                 vid["released"] = datetime.fromtimestamp(
@@ -923,63 +454,43 @@ def meta(content_type: str, meta_id: str):
             return stremio_response({"meta": result})
 
         # ── Movie meta ──
-        if content_type == "movie" and meta_id.startswith("anime3rb_vod_"):
-            vod_id = meta_id.replace("anime3rb_vod_", "")
-            vod_data = None
-            try:
-                vod_data = get_vod_info(vod_id)
-            except Exception:
-                pass
+        if content_type == "movie" and meta_id.startswith("anime3rb_v_"):
+            vod_id = meta_id.replace("anime3rb_v_", "")
+            vod_data = get_vod_info(vod_id)
 
+            # Also check the VOD list for extra info
             all_vod = get_all_vod()
             vod_item = next(
                 (v for v in all_vod if str(v.get("stream_id")) == vod_id), None
             ) if isinstance(all_vod, list) else None
 
-            info = (
-                vod_data.get("info") if vod_data and "info" in vod_data else vod_item
-            )
+            info = vod_data.get("info") if vod_data and "info" in vod_data else vod_item
             if not info:
                 return stremio_response({"meta": None})
 
-            movie_name = info.get("name") or info.get("movie_name", "")
             result: dict[str, Any] = {
                 "id": meta_id,
                 "type": "movie",
-                "name": movie_name,
+                "name": info.get("name") or info.get("movie_name", ""),
                 "posterShape": "poster",
             }
-            poster = (
-                info.get("stream_icon")
-                or info.get("cover")
-                or info.get("movie_img")
-            )
+            poster = info.get("stream_icon") or info.get("cover") or info.get("movie_img")
             if poster:
                 result["poster"] = poster
                 result["background"] = poster
             if info.get("plot") or info.get("description"):
                 result["description"] = info.get("plot") or info.get("description")
             if info.get("genre"):
-                result["genres"] = [g.strip() for g in info["genre"].split(",")]
+                result["genres"] = [g.strip() for g in info["genre"].split(",") if g.strip()]
             if info.get("releaseDate"):
-                result["releaseInfo"] = info["releaseDate"][:4]
+                result["releaseInfo"] = str(info["releaseDate"])[:4]
             if info.get("rating"):
-                result["imdbRating"] = info["rating"]
-
-            # TVDB artwork: background + logo for every movie
-            tvdb_art = _get_tvdb_art(movie_name, "movie")
-            if tvdb_art.get("background"):
-                result["background"] = tvdb_art["background"]
-            if tvdb_art.get("logo"):
-                result["logo"] = tvdb_art["logo"]
-            if tvdb_art.get("poster"):
-                result["poster"] = tvdb_art["poster"]
+                result["imdbRating"] = str(info["rating"])
 
             return stremio_response({"meta": result})
 
     except Exception as e:
         print(f"[Meta] Error: {e}")
-
     return stremio_response({"meta": None})
 
 
@@ -987,8 +498,8 @@ def meta(content_type: str, meta_id: str):
 def stream(content_type: str, stream_id: str):
     try:
         # ── Series stream ──
-        if content_type == "series" and stream_id.startswith("anime3rb_series_"):
-            raw = stream_id.replace("anime3rb_series_", "")
+        if content_type == "series" and stream_id.startswith("anime3rb_s_"):
+            raw = stream_id.replace("anime3rb_s_", "")
             parts = raw.split(":")
             if len(parts) < 3:
                 return stremio_response({"streams": []})
@@ -1015,15 +526,15 @@ def stream(content_type: str, stream_id: str):
             return stremio_response({
                 "streams": [{
                     "url": stream_url,
-                    "title": f"{ep.get('title', 'الحلقة ' + episode_num)}",
+                    "title": ep.get("title", f"Episode {episode_num}"),
                     "name": "Anime3rb",
                     "behaviorHints": {"notWebReady": True},
                 }]
             })
 
         # ── Movie stream ──
-        if content_type == "movie" and stream_id.startswith("anime3rb_vod_"):
-            vod_id = stream_id.replace("anime3rb_vod_", "")
+        if content_type == "movie" and stream_id.startswith("anime3rb_v_"):
+            vod_id = stream_id.replace("anime3rb_v_", "")
             all_vod = get_all_vod()
             vod_item = next(
                 (v for v in all_vod if str(v.get("stream_id")) == vod_id), None
@@ -1042,15 +553,16 @@ def stream(content_type: str, stream_id: str):
 
     except Exception as e:
         print(f"[Stream] Error: {e}")
-
     return stremio_response({"streams": []})
 
 
 @app.get("/health")
 def health():
+    m = _get_manifest()
     return {
         "status": "ok",
-        "version": MANIFEST["version"],
+        "version": m.get("version", "?"),
+        "catalogs": len(m.get("catalogs", [])),
         "cache_size_mb": round(_cache_size_mb(), 1),
         "cache_keys": len(_cache),
     }
@@ -1061,45 +573,46 @@ def _warm_cache() -> None:
     import gc
     try:
         time.sleep(2)
-        print("[Cache] Warming: series list...")
+        print("[Startup] Loading categories...")
+        get_series_categories()
+        get_vod_categories()
+        gc.collect()
+        print("[Startup] Loading series list...")
         get_all_series()
         gc.collect()
-        print("[Cache] Warming: VOD list...")
+        print("[Startup] Loading VOD list...")
         get_all_vod()
         gc.collect()
-        print("[Cache] Warming: categories...")
-        get_series_categories()
-        gc.collect()
-        print("[Cache] Warm-up complete!")
+        print("[Startup] Cache warm-up complete!")
     except Exception as e:
-        print(f"[Cache] Warm-up error: {e}")
+        print(f"[Startup] Warm-up error: {e}")
 
 
 def _background_refresh() -> None:
     while True:
         try:
             time.sleep(CACHE_TTL - 300)
-            print("[Cache] Background refresh...")
+            print("[Refresh] Refreshing catalog data...")
             with _lock:
-                for key in ["series_categories", "all_series", "all_vod"]:
+                for key in ["series_categories", "vod_categories", "all_series", "all_vod"]:
                     _cache.pop(key, None)
                     _cache_ts.pop(key, None)
             get_series_categories()
+            get_vod_categories()
             get_all_series()
             get_all_vod()
-            print("[Cache] Background refresh complete!")
+            global _manifest_ts
+            _manifest_ts = 0
+            print("[Refresh] Done!")
         except Exception as e:
-            print(f"[Cache] Background refresh error: {e}")
+            print(f"[Refresh] Error: {e}")
 
 
 @app.on_event("startup")
 def startup():
-    t = threading.Thread(target=_warm_cache, daemon=True)
-    t.start()
-    r = threading.Thread(target=_background_refresh, daemon=True)
-    r.start()
-    print(f"[Addon] v{MANIFEST['version']} ready!")
-    print(f"[Addon] Install: http://localhost:8000/manifest.json")
+    threading.Thread(target=_warm_cache, daemon=True).start()
+    threading.Thread(target=_background_refresh, daemon=True).start()
+    print("[Addon] Anime3rb IPTV v5.0.0 ready!")
 
 
 if __name__ == "__main__":
