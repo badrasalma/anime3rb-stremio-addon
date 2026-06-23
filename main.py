@@ -120,20 +120,22 @@ def stream(content_type: str, stremio_id: str, params: str = ""):
 def _get_series_stream(stremio_id: str) -> list:
     """Get stream for a series episode.
     
-    stremio_id format: kitsu:XXXXX:SEASON:EPISODE
+    Stremio sends: kitsu:XXXXX:EPISODE (3 parts, absolute episode number)
+    Or sometimes: kitsu:XXXXX:SEASON:EPISODE (4 parts)
     """
     parts = stremio_id.split(":")
-    if len(parts) < 4 or parts[0] != "kitsu":
+    if len(parts) < 3 or parts[0] != "kitsu":
         return []
 
     kitsu_id = parts[1]
     try:
-        season = int(parts[2])
-        episode = int(parts[3])
+        if len(parts) == 3:
+            episode = int(parts[2])
+        else:
+            episode = int(parts[3])
     except (ValueError, IndexError):
         return []
 
-    # Look up anime3rb series_id from kitsu map
     mapping = _kitsu_map.get(kitsu_id)
     if not mapping:
         print(f"[Stream] No mapping for kitsu:{kitsu_id}")
@@ -153,34 +155,15 @@ def _get_series_stream(stremio_id: str) -> list:
     if not data or "episodes" not in data:
         return []
 
-    # Find the episode
+    # Search all seasons for the episode number
     episodes_data = data["episodes"]
-    
-    # Try exact season match first
-    season_key = str(season)
-    if season_key in episodes_data:
-        for ep in episodes_data[season_key]:
+    for s_key in sorted(episodes_data.keys(), key=lambda x: int(x)):
+        for ep in episodes_data[s_key]:
             ep_num = int(ep.get("episode_num", 0))
             if ep_num == episode:
                 return _build_stream(ep)
 
-    # If season 1, also search all seasons (some anime have only season 1)
-    if season == 1:
-        for s_key, eps in episodes_data.items():
-            for ep in eps:
-                ep_num = int(ep.get("episode_num", 0))
-                if ep_num == episode:
-                    return _build_stream(ep)
-
-    # Fallback: search by absolute episode number across all seasons
-    absolute_ep = episode
-    for s_key in sorted(episodes_data.keys(), key=lambda x: int(x)):
-        for ep in episodes_data[s_key]:
-            ep_num = int(ep.get("episode_num", 0))
-            if ep_num == absolute_ep:
-                return _build_stream(ep)
-
-    print(f"[Stream] Episode not found: S{season}E{episode} in series {series_id}")
+    print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
     return []
 
 
