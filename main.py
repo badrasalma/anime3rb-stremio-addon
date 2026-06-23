@@ -159,9 +159,20 @@ def _get_series_stream(stremio_id: str) -> list:
     episodes_data = data["episodes"]
     for s_key in sorted(episodes_data.keys(), key=lambda x: int(x)):
         for ep in episodes_data[s_key]:
-            ep_num = int(ep.get("episode_num", 0))
-            if ep_num == episode:
-                return _build_stream(ep)
+            ep_num_raw = str(ep.get("episode_num", "0"))
+            # Handle combined episodes like "132 ~ 134"
+            try:
+                if "~" in ep_num_raw:
+                    parts_ep = ep_num_raw.split("~")
+                    start = int(parts_ep[0].strip())
+                    end = int(parts_ep[1].strip())
+                    if start <= episode <= end:
+                        return _build_stream(ep)
+                else:
+                    if int(ep_num_raw) == episode:
+                        return _build_stream(ep)
+            except (ValueError, IndexError):
+                continue
 
     print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
     return []
