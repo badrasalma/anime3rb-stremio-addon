@@ -8,6 +8,8 @@ Uses Kitsu ID mapping (kitsu:XXXX → anime3rb series_id).
 """
 import json
 import os
+import time
+from collections import deque
 from pathlib import Path
 
 from curl_cffi import requests as cffi_requests
@@ -22,6 +24,9 @@ PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
 # ─── Kitsu ID Map ───
 DATA_DIR = Path(__file__).parent / "data"
 _kitsu_map: dict = {}
+
+# ─── Request Log (for debugging) ───
+_request_log: deque = deque(maxlen=50)
 
 
 def _load_kitsu_map():
@@ -96,6 +101,11 @@ def manifest(params: str = ""):
 def stream(content_type: str, stremio_id: str, params: str = ""):
     """Fetch stream LIVE from anime3rb API. No cache."""
     print(f"[Stream] Request: {content_type}/{stremio_id}")
+    _request_log.append({
+        "time": time.strftime("%H:%M:%S"),
+        "type": content_type,
+        "id": stremio_id,
+    })
 
     streams = []
 
@@ -239,6 +249,12 @@ def health():
         "kitsu_map_size": len(_kitsu_map),
         "mode": "stream-only, live from source, no cache",
     }
+
+
+@app.get("/debug/requests")
+def debug_requests():
+    """Show last 50 stream requests for debugging."""
+    return {"requests": list(_request_log)}
 
 
 # ─── Startup ───
