@@ -46,8 +46,7 @@ def _make_scraper():
 scraper = _make_scraper()
 
 # ─── In-memory cache ───
-CACHE_TTL = 6 * 60 * 60
-SERIES_INFO_TTL = 1 * 60 * 60
+CACHE_TTL = 1 * 60 * 60  # 1 hour for catalog lists (series list, VOD list)
 MAX_CACHE_MB = 60
 
 _cache: OrderedDict[str, Any] = OrderedDict()
@@ -253,58 +252,21 @@ def get_all_vod() -> list[dict]:
 
 
 def get_series_info(series_id: str) -> dict:
-    key = f"series_info_{series_id}"
-    cached = cache_get(key, SERIES_INFO_TTL)
-    if cached is not None:
-        return cached
+    """Always fetch fresh from API — no cache. Episodes update immediately."""
     try:
         data = api_call("get_series_info", f"&series_id={series_id}", timeout=120)
         if data:
-            cache_set(key, data)
             return data
     except Exception as e:
         print(f"[API] get_series_info {series_id} failed: {e}")
-    # Fallback to episodes.json
-    eps_data = _get_episodes_cache()
-    sid = str(series_id)
-    if sid in eps_data:
-        entry = eps_data[sid]
-        episodes = {}
-        for season, eps in entry.get("episodes", {}).items():
-            episodes[season] = [
-                {
-                    "episode_num": ep.get("e"),
-                    "stream_id": ep.get("s"),
-                    "container_extension": ep.get("x", "mp4"),
-                    "title": ep.get("t", ""),
-                }
-                for ep in eps
-            ]
-        result = {
-            "info": {
-                "name": entry.get("name", ""),
-                "cover": entry.get("cover", ""),
-                "plot": entry.get("plot", ""),
-                "genre": entry.get("genre", ""),
-                "rating": entry.get("rating", ""),
-                "releaseDate": entry.get("releaseDate", ""),
-            },
-            "episodes": episodes,
-        }
-        cache_set(key, result)
-        return result
     return {}
 
 
 def get_vod_info(vod_id: str) -> dict:
-    key = f"vod_info_{vod_id}"
-    cached = cache_get(key, SERIES_INFO_TTL)
-    if cached is not None:
-        return cached
+    """Always fetch fresh from API — no cache."""
     try:
         data = api_call("get_vod_info", f"&vod_id={vod_id}", timeout=60)
         if data:
-            cache_set(key, data)
             return data
     except Exception as e:
         print(f"[API] get_vod_info {vod_id} failed: {e}")
@@ -464,7 +426,7 @@ def _build_manifest(series_cats: list[dict], vod_cats: list[dict]) -> dict:
 
     return {
         "id": "com.anime3rb.iptv",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "name": "Anime3rb أنمي",
         "description": "أنمي عرب — IPTV",
         "logo": "https://anime3rb.vip/favicon.ico",
@@ -899,7 +861,7 @@ def _background_refresh() -> None:
 def startup():
     threading.Thread(target=_warm_cache, daemon=True).start()
     threading.Thread(target=_background_refresh, daemon=True).start()
-    print("[Addon] Anime3rb IPTV v5.0.0 ready!")
+    print("[Addon] Anime3rb IPTV v6.0.0 ready — LIVE from source, no episode cache!")
 
 
 if __name__ == "__main__":
