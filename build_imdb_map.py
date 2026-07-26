@@ -163,6 +163,11 @@ def main():
                     mtype = m.get("type") if m else "vod"
                     movies_out[imdb] = {"id": a3_id, "type": mtype}
                 continue
+            # Only real series episodes participate in season/episode numbering.
+            # Specials (season 0) and OVA/SPECIAL/MUSIC entries are excluded so they
+            # don't pollute the ordered/absolute episode flow.
+            if season == 0 or etype not in ("TV", "ONA"):
+                continue
             rec = series_out.setdefault(imdb, {"tvdb": tvdb, "_entries": []})
             if tvdb and not rec.get("tvdb"):
                 rec["tvdb"] = tvdb
