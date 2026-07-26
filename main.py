@@ -77,13 +77,13 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "7.0.0",
+    "version": "7.1.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً",
     "logo": "https://anime3rb.vip/favicon.ico",
     "resources": ["stream"],
     "types": ["series", "movie"],
-    "idPrefixes": ["kitsu:"],
+    "idPrefixes": ["kitsu:", "anilist:", "mal:", "anidb:", "tt", "tmdb:", "tvdb:"],
     "catalogs": [],
     "behaviorHints": {"configurable": False},
 }
