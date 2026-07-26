@@ -1,13 +1,23 @@
-"""Anime3rb Stream Addon v7.0.0
+"""Anime3rb Stream Addon v8.0.0
 
-Stream-only addon. No catalogs, no cache for episodes.
-Every stream request fetches LIVE from anime3rb API via curl_cffi.
-Episode released on the website = appears in the addon immediately.
+Stream-only addon. No catalogs, no episode cache.
+Every stream request fetches LIVE from anime3rb API via curl_cffi, so an episode
+released on the website appears in the addon immediately.
 
-Uses Kitsu ID mapping (kitsu:XXXX → anime3rb series_id).
+Supported incoming IDs:
+  - IMDB   (Xperience / Cinemeta style):  tt1234567:SEASON:EPISODE   (series)
+                                          tt1234567                  (movie)
+  - Kitsu  (legacy):                      kitsu:XXXXX:EPISODE
+                                          kitsu:XXXXX:SEASON:EPISODE
+
+Mapping data (data/imdb_map.json, data/kitsu_map.json) maps a stable series
+identity -> anime3rb series id. Episode availability is always fetched live.
+For long single-series anime (One Piece, Conan, ...) IMDB season/episode is
+converted to an absolute episode number using pre-baked TVDB offsets.
 """
 import json
 import os
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -21,23 +31,28 @@ BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
 USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
 PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
 
-# ─── Kitsu ID Map ───
+# ─── Maps ───
 DATA_DIR = Path(__file__).parent / "data"
 _kitsu_map: dict = {}
+_imdb_series: dict = {}
+_imdb_movies: dict = {}
 
 # ─── Request Log (for debugging) ───
 _request_log: deque = deque(maxlen=50)
 
 
-def _load_kitsu_map():
-    global _kitsu_map
-    fpath = DATA_DIR / "kitsu_map.json"
-    if fpath.exists():
-        with open(fpath) as f:
-            _kitsu_map = json.load(f)
+def _load_maps():
+    global _kitsu_map, _imdb_series, _imdb_movies
+    kpath = DATA_DIR / "kitsu_map.json"
+    if kpath.exists():
+        _kitsu_map = json.load(open(kpath))
         print(f"[Map] Loaded {len(_kitsu_map)} Kitsu mappings")
-    else:
-        print("[Map] WARNING: kitsu_map.json not found!")
+    ipath = DATA_DIR / "imdb_map.json"
+    if ipath.exists():
+        m = json.load(open(ipath))
+        _imdb_series = m.get("series", {})
+        _imdb_movies = m.get("movies", {})
+        print(f"[Map] Loaded {len(_imdb_series)} IMDB series, {len(_imdb_movies)} IMDB movies")
 
 
 # ─── API Call (curl_cffi — bypasses Cloudflare) ───
@@ -51,6 +66,17 @@ def api_call(action: str = "", extra: str = "", timeout: int = 60):
     if r.status_code == 200:
         return r.json()
     raise RuntimeError(f"API returned {r.status_code}")
+
+
+def _series_info(series_id: str):
+    try:
+        data = api_call("get_series_info", f"&series_id={series_id}", timeout=30)
+    except Exception as e:
+        print(f"[Stream] API error for series {series_id}: {e}")
+        return None
+    if not data or "episodes" not in data:
+        return None
+    return data
 
 
 # ─── FastAPI App ───
@@ -77,13 +103,13 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "7.1.0",
+    "version": "8.0.0",
     "name": "Anime3rb بث",
-    "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً",
+    "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
     "resources": ["stream"],
     "types": ["series", "movie"],
-    "idPrefixes": ["kitsu:", "anilist:", "mal:", "anidb:", "tt", "tmdb:", "tvdb:"],
+    "idPrefixes": ["tt", "kitsu:"],
     "catalogs": [],
     "behaviorHints": {"configurable": False},
 }
@@ -108,86 +134,65 @@ def stream(content_type: str, stremio_id: str, params: str = ""):
     })
 
     streams = []
-
-    if content_type == "series":
-        streams = _get_series_stream(stremio_id)
-    elif content_type == "movie":
-        streams = _get_movie_stream(stremio_id)
+    if stremio_id.startswith("tt"):
+        if content_type == "series":
+            streams = _get_imdb_series_stream(stremio_id)
+        elif content_type == "movie":
+            streams = _get_imdb_movie_stream(stremio_id)
+    elif stremio_id.startswith("kitsu:"):
+        if content_type == "series":
+            streams = _get_kitsu_series_stream(stremio_id)
+        elif content_type == "movie":
+            streams = _get_kitsu_movie_stream(stremio_id)
 
     return stremio_response({"streams": streams})
 
 
-def _get_series_stream(stremio_id: str) -> list:
-    """Get stream for a series episode.
-    
-    Stremio sends: kitsu:XXXXX:EPISODE (3 parts, absolute episode number)
-    Or sometimes: kitsu:XXXXX:SEASON:EPISODE (4 parts)
-    """
-    parts = stremio_id.split(":")
-    if len(parts) < 3 or parts[0] != "kitsu":
-        return []
+# ─── Episode helpers ───
+def _ep_int(ep_num_raw) -> int:
+    """Leading integer of an episode_num (handles '132 ~ 134')."""
+    m = re.match(r"\s*(\d+)", str(ep_num_raw))
+    return int(m.group(1)) if m else 0
 
-    kitsu_id = parts[1]
-    try:
-        if len(parts) == 3:
-            episode = int(parts[2])
-        else:
-            episode = int(parts[3])
-    except (ValueError, IndexError):
-        return []
 
-    mapping = _kitsu_map.get(kitsu_id)
-    if not mapping:
-        print(f"[Stream] No mapping for kitsu:{kitsu_id}")
-        return []
+def _episodes_in_order(data: dict) -> list:
+    """Flatten all seasons into one list ordered by episode number."""
+    out = []
+    eps = data["episodes"]
+    for s_key in sorted(eps.keys(), key=lambda x: int(x)):
+        out.extend(eps[s_key])
+    out.sort(key=lambda ep: _ep_int(ep.get("episode_num", 0)))
+    return out
 
-    series_id = mapping.get("id") if isinstance(mapping, dict) else str(mapping)
-    if not series_id:
-        return []
 
-    # Fetch episodes LIVE from API
-    try:
-        data = api_call("get_series_info", f"&series_id={series_id}", timeout=30)
-    except Exception as e:
-        print(f"[Stream] API error for series {series_id}: {e}")
-        return []
-
-    if not data or "episodes" not in data:
-        return []
-
-    # Search all seasons for the episode number
-    episodes_data = data["episodes"]
-    for s_key in sorted(episodes_data.keys(), key=lambda x: int(x)):
-        for ep in episodes_data[s_key]:
-            ep_num_raw = str(ep.get("episode_num", "0"))
-            # Handle combined episodes like "132 ~ 134"
+def _find_by_epnum(data: dict, episode: int):
+    """Find an episode by its anime3rb episode_num (handles combined ranges)."""
+    eps = data["episodes"]
+    for s_key in sorted(eps.keys(), key=lambda x: int(x)):
+        for ep in eps[s_key]:
+            raw = str(ep.get("episode_num", "0"))
             try:
-                if "~" in ep_num_raw:
-                    parts_ep = ep_num_raw.split("~")
-                    start = int(parts_ep[0].strip())
-                    end = int(parts_ep[1].strip())
-                    if start <= episode <= end:
-                        return _build_stream(ep)
-                else:
-                    if int(ep_num_raw) == episode:
-                        return _build_stream(ep)
+                if "~" in raw:
+                    a, b = raw.split("~")
+                    if int(a.strip()) <= episode <= int(b.strip()):
+                        return ep
+                elif int(_ep_int(raw)) == episode:
+                    return ep
             except (ValueError, IndexError):
                 continue
-
-    print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
-    return []
+    return None
 
 
 def _build_stream(ep: dict) -> list:
     """Build Stremio stream object from episode data."""
+    if not ep:
+        return []
     stream_id = ep.get("id") or ep.get("stream_id")
     container = ep.get("container_extension", "mp4")
     if not stream_id:
         return []
-    
     url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
     title = ep.get("title") or f"Episode {ep.get('episode_num', '?')}"
-    
     return [{
         "url": url,
         "title": f"Anime3rb: {title}",
@@ -195,30 +200,125 @@ def _build_stream(ep: dict) -> list:
     }]
 
 
-def _get_movie_stream(stremio_id: str) -> list:
-    """Get stream for a movie.
-    
-    stremio_id format: kitsu:XXXXX
-    """
+# ─── IMDB resolution ───
+def _get_imdb_series_stream(stremio_id: str) -> list:
+    """tt1234567:SEASON:EPISODE  ->  anime3rb stream (fetched live)."""
     parts = stremio_id.split(":")
-    if len(parts) < 2 or parts[0] != "kitsu":
+    imdb = parts[0]
+    try:
+        season = int(parts[1]) if len(parts) > 1 else 1
+        episode = int(parts[2]) if len(parts) > 2 else 1
+    except (ValueError, IndexError):
         return []
 
+    rec = _imdb_series.get(imdb)
+    if not rec:
+        print(f"[Stream] No IMDB mapping for {imdb}")
+        return []
+
+    season_parts = rec.get("seasons", {}).get(str(season))
+    if season_parts:
+        # Clean season mapping: one or more anime3rb series make up this season.
+        if len(season_parts) == 1:
+            data = _series_info(season_parts[0])
+            if not data:
+                return []
+            return _build_stream(_find_by_epnum(data, episode))
+        # Multiple parts within one IMDB season -> continuous numbering across parts.
+        target = episode
+        for a3 in season_parts:
+            data = _series_info(a3)
+            if not data:
+                return []
+            eps = _episodes_in_order(data)
+            if target <= len(eps):
+                return _build_stream(eps[target - 1])
+            target -= len(eps)
+        return []
+
+    # Single long series (IMDB splits into many seasons, anime3rb uses absolute numbering).
+    offsets = rec.get("season_offsets", {})
+    if str(season) in offsets:
+        abs_ep = offsets[str(season)] + episode
+    else:
+        abs_ep = episode  # fallback (usually season 1 / no offset data)
+
+    ordered = rec.get("ordered", [])
+    if len(ordered) == 1:
+        data = _series_info(ordered[0])
+        if not data:
+            return []
+        return _build_stream(_find_by_epnum(data, abs_ep))
+
+    # Messy multi-series without clean season map: concatenate by count.
+    target = abs_ep
+    for a3 in ordered:
+        data = _series_info(a3)
+        if not data:
+            return []
+        eps = _episodes_in_order(data)
+        if target <= len(eps):
+            return _build_stream(eps[target - 1])
+        target -= len(eps)
+    return []
+
+
+def _get_imdb_movie_stream(stremio_id: str) -> list:
+    imdb = stremio_id.split(":")[0]
+    rec = _imdb_movies.get(imdb)
+    if not rec:
+        print(f"[Stream] No IMDB movie mapping for {imdb}")
+        return []
+    return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+
+
+# ─── Kitsu resolution (legacy) ───
+def _get_kitsu_series_stream(stremio_id: str) -> list:
+    parts = stremio_id.split(":")
+    if len(parts) < 3:
+        return []
     kitsu_id = parts[1]
+    try:
+        episode = int(parts[2]) if len(parts) == 3 else int(parts[3])
+    except (ValueError, IndexError):
+        return []
     mapping = _kitsu_map.get(kitsu_id)
     if not mapping:
+        print(f"[Stream] No mapping for kitsu:{kitsu_id}")
         return []
+    series_id = mapping.get("id") if isinstance(mapping, dict) else str(mapping)
+    if not series_id:
+        return []
+    data = _series_info(series_id)
+    if not data:
+        return []
+    ep = _find_by_epnum(data, episode)
+    if not ep:
+        print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
+    return _build_stream(ep)
 
+
+def _get_kitsu_movie_stream(stremio_id: str) -> list:
+    parts = stremio_id.split(":")
+    if len(parts) < 2:
+        return []
+    mapping = _kitsu_map.get(parts[1])
+    if not mapping:
+        return []
     item_type = mapping.get("type") if isinstance(mapping, dict) else "series"
     item_id = mapping.get("id") if isinstance(mapping, dict) else str(mapping)
+    return _vod_or_series_stream(item_id, item_type)
 
-    if item_type == "vod" and item_id:
+
+def _vod_or_series_stream(item_id, item_type) -> list:
+    if not item_id:
+        return []
+    if item_type == "vod":
         try:
             data = api_call("get_vod_info", f"&vod_id={item_id}", timeout=30)
         except Exception as e:
             print(f"[Stream] API error for vod {item_id}: {e}")
             return []
-        
         if data and "movie_data" in data:
             movie = data["movie_data"]
             container = movie.get("container_extension", "mp4")
@@ -230,32 +330,37 @@ def _get_movie_stream(stremio_id: str) -> list:
                 "title": f"Anime3rb: {name}",
                 "behaviorHints": {"notWebReady": True},
             }]
+        return []
+    # series-type "movie" (a movie stored as a single-episode series)
+    data = _series_info(item_id)
+    if not data:
+        return []
+    eps = _episodes_in_order(data)
+    return _build_stream(eps[0]) if eps else []
 
-    return []
 
-
-# ─── Health ───
+# ─── Health / Debug ───
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "version": "7.0.0",
+        "version": MANIFEST["version"],
         "kitsu_map_size": len(_kitsu_map),
+        "imdb_series_size": len(_imdb_series),
+        "imdb_movies_size": len(_imdb_movies),
         "mode": "stream-only, live from source, no cache",
     }
 
 
 @app.get("/debug/requests")
 def debug_requests():
-    """Show last 50 stream requests for debugging."""
     return {"requests": list(_request_log)}
 
 
-# ─── Startup ───
 @app.on_event("startup")
 def startup():
-    _load_kitsu_map()
-    print("[Addon] Anime3rb Stream v7.0.0 — LIVE from source, no cache!")
+    _load_maps()
+    print(f"[Addon] Anime3rb Stream v{MANIFEST['version']} — LIVE from source, no cache!")
 
 
 if __name__ == "__main__":
