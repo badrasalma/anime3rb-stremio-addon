@@ -264,12 +264,10 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
 
 
 def _get_imdb_movie_stream(stremio_id: str) -> list:
-    imdb = stremio_id.split(":")[0]
-    rec = _imdb_movies.get(imdb)
-    if not rec:
-        print(f"[Stream] No IMDB movie mapping for {imdb}")
-        return []
-    return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+    # IMDB movie mapping is currently unreliable (most entries resolve to the parent
+    # series, not the specific film), so it is disabled to avoid wrong streams.
+    # Re-enable once mappings are validated against a real Xperience movie request.
+    return []
 
 
 # ─── Kitsu resolution (legacy) ───
