@@ -53,6 +53,15 @@ def _load_maps():
         _imdb_series = m.get("series", {})
         _imdb_movies = m.get("movies", {})
         print(f"[Map] Loaded {len(_imdb_series)} IMDB series, {len(_imdb_movies)} IMDB movies")
+    # Manual overrides take precedence — used for titles the auto-mapper misses
+    # (e.g. brand-new movies not yet in the open IMDB<->anime relations database).
+    opath = DATA_DIR / "overrides.json"
+    if opath.exists():
+        o = json.load(open(opath))
+        _imdb_series.update(o.get("series", {}))
+        _imdb_movies.update(o.get("movies", {}))
+        print(f"[Map] Applied overrides: {len(o.get('series', {}))} series, "
+              f"{len(o.get('movies', {}))} movies")
 
 
 # ─── API Call (curl_cffi — bypasses Cloudflare) ───
