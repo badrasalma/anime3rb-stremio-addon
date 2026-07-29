@@ -44,6 +44,11 @@ def fetch_anime3rb_series():
     return cffi_requests.get(url, impersonate="chrome", timeout=90).json()
 
 
+def fetch_anime3rb_vod():
+    url = f"{BASE_URL}/player_api.php?username={USERNAME}&password={PASSWORD}&action=get_vod_streams"
+    return cffi_requests.get(url, impersonate="chrome", timeout=90).json()
+
+
 def build_manami_index():
     d = _download_json(MANAMI_URL)
     data = d["data"] if isinstance(d, dict) else d
@@ -97,7 +102,10 @@ def main():
     manami = build_manami_index()
     print("fetching anime3rb series ...")
     a3_series = fetch_anime3rb_series()
-    print(f"anime-lists={len(anime_lists)} manami_idx={len(manami)} a3_series={len(a3_series)}")
+    print("fetching anime3rb VOD (movies) ...")
+    a3_vod = fetch_anime3rb_vod()
+    print(f"anime-lists={len(anime_lists)} manami_idx={len(manami)} "
+          f"a3_series={len(a3_series)} a3_vod={len(a3_vod)}")
 
     def usable(n: str) -> bool:
         # reject junk/ambiguous normalized titles to avoid false name matches
@@ -114,6 +122,20 @@ def main():
         if usable(n) and n not in a3_by_name:
             a3_by_name[n] = str(s.get("series_id"))
     a3_ids = {str(s.get("series_id")) for s in a3_series}
+
+    # anime3rb VOD (movies) normalized-name index -> stream_id
+    vod_by_name: dict = {}
+    for v in a3_vod:
+        n = norm(v.get("name") or "")
+        if usable(n) and n not in vod_by_name:
+            vod_by_name[n] = str(v.get("stream_id"))
+
+    def match_vod(entry):
+        for t in titles_for(entry):
+            n = norm(t)
+            if usable(n) and n in vod_by_name:
+                return vod_by_name[n]
+        return None
 
     def titles_for(entry):
         for kind in ("mal", "anilist", "kitsu", "anidb"):
@@ -158,10 +180,10 @@ def main():
 
         for imdb in imdbs:
             if etype == "MOVIE":
-                if a3_id and imdb not in movies_out:
-                    m = kitsu_map.get(str(e.get("kitsu_id"))) if e.get("kitsu_id") else None
-                    mtype = m.get("type") if m else "vod"
-                    movies_out[imdb] = {"id": a3_id, "type": mtype}
+                if imdb not in movies_out:
+                    vod_id = match_vod(e)
+                    if vod_id:
+                        movies_out[imdb] = {"id": vod_id, "type": "vod"}
                 continue
             # Only real series episodes participate in season/episode numbering.
             # Specials (season 0) and OVA/SPECIAL/MUSIC entries are excluded so they
