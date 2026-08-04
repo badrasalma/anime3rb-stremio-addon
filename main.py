@@ -257,7 +257,13 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
         data = _series_info(ordered[0])
         if not data:
             return []
-        return _build_stream(_find_by_epnum(data, abs_ep))
+        ep = _find_by_epnum(data, abs_ep)
+        # Some catalogs already send an absolute episode number (e.g. One Piece
+        # season 16 episode 643). If the season-offset conversion overshoots, fall
+        # back to treating the given episode number as already-absolute.
+        if not ep and abs_ep != episode:
+            ep = _find_by_epnum(data, episode)
+        return _build_stream(ep)
 
     # Messy multi-series without clean season map: concatenate by count.
     target = abs_ep
