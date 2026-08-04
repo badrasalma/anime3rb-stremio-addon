@@ -210,6 +210,26 @@ def _build_stream(ep: dict) -> list:
 
 
 # ─── IMDB resolution ───
+def _abs_episode(offsets: dict, season: int, episode: int, max_ep: int) -> int:
+    """Convert (season, episode) to an absolute episode number for a single
+    continuous anime3rb series.
+
+    Catalogs disagree on numbering: some send a within-season number (needs the
+    season offset added), others already send the absolute episode number under
+    an arbitrary season label. We tell them apart by season length: if the
+    episode number can't fit inside its own season, it must already be absolute.
+    """
+    key = str(season)
+    if key not in offsets:
+        return episode
+    off = offsets[key]
+    nxt = offsets.get(str(season + 1))
+    season_len = (nxt - off) if nxt is not None else (max_ep - off)
+    if season_len > 0 and episode <= season_len:
+        return off + episode
+    return episode
+
+
 def _get_imdb_series_stream(stremio_id: str) -> list:
     """tt1234567:SEASON:EPISODE  ->  anime3rb stream (fetched live)."""
     parts = stremio_id.split(":")
@@ -247,25 +267,28 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
 
     # Single long series (IMDB splits into many seasons, anime3rb uses absolute numbering).
     offsets = rec.get("season_offsets", {})
-    if str(season) in offsets:
-        abs_ep = offsets[str(season)] + episode
-    else:
-        abs_ep = episode  # fallback (usually season 1 / no offset data)
-
     ordered = rec.get("ordered", [])
     if len(ordered) == 1:
         data = _series_info(ordered[0])
         if not data:
             return []
+        eps_ordered = _episodes_in_order(data)
+        # Highest episode number present (anime3rb numbering may have gaps, so the
+        # max number is what matters for the last season's length, not the count).
+        max_epnum = _ep_int(eps_ordered[-1].get("episode_num", 0)) if eps_ordered else 0
+        abs_ep = _abs_episode(offsets, season, episode, max_epnum)
         ep = _find_by_epnum(data, abs_ep)
-        # Some catalogs already send an absolute episode number (e.g. One Piece
-        # season 16 episode 643). If the season-offset conversion overshoots, fall
-        # back to treating the given episode number as already-absolute.
+        # Safety net: if the season-offset conversion overshoots the series,
+        # treat the given episode number as already-absolute.
         if not ep and abs_ep != episode:
             ep = _find_by_epnum(data, episode)
         return _build_stream(ep)
 
     # Messy multi-series without clean season map: concatenate by count.
+    if str(season) in offsets:
+        abs_ep = offsets[str(season)] + episode
+    else:
+        abs_ep = episode
     target = abs_ep
     for a3 in ordered:
         data = _series_info(a3)
