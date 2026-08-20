@@ -28,8 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # ─── Configuration ───
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
-USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
-PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
+USERNAME = os.environ["ANIME3RB_USER"]
+PASSWORD = os.environ["ANIME3RB_PASS"]
 
 # ─── Maps ───
 DATA_DIR = Path(__file__).parent / "data"
