@@ -5,10 +5,10 @@
       "includeFiles": "{main.py,data/*.json}"
     }
   },
-  "rewrites": [
+  "routes": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index"
+      "src": "/(.*)",
+      "dest": "/api/index"
     }
   ],
   "regions": [
