@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "includeFiles": "{main.py,data/*.json}"
+    }
+  },
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index"
+    }
+  ],
+  "regions": [
+    "fra1"
+  ]
+}

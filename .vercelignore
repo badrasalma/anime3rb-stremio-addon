@@ -1,0 +1,10 @@
+__pycache__
+.github
+*.tvdb-backup.json
+add_tmdb_offsets.py
+add_tvdb_offsets.py
+build_imdb_map.py
+build_kitsu_map.py
+rebuild_kitsu_map.py
+fetch_data.py
+render.yaml
