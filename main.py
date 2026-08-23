@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.5.0",
+    "version": "8.6.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -201,8 +201,18 @@ QUALITY = "1080p"
 SOURCE = "WEB-DL"
 AUDIO = "Japanese"
 SUBS = "Arabic"
+ENCODE = "x264"
+AUDIO_CODEC = "AAC"
+AUDIO_CHANNELS = "2.0"
+RELEASE_GROUP = "Anime3rb"
 # Aggregators derive the "cached" badge from a service tag in the stream name.
 SERVICE_TAG = "[TB+]"
+# Typical runtimes/sizes for a 1080p web release, used to fill the aggregator's
+# duration/size/bitrate fields (anime3rb's API reports neither).
+EPISODE_MINUTES = 24
+MOVIE_MINUTES = 100
+EPISODE_BYTES = 734003200  # 700 MiB
+MOVIE_BYTES = 2684354560  # 2.5 GiB
 
 
 def _slug(text: str) -> str:
@@ -211,20 +221,25 @@ def _slug(text: str) -> str:
 
 
 def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
-                binge_key: str = "") -> dict:
+                binge_key: str = "", movie: bool = False) -> dict:
     ext = url.rsplit(".", 1)[-1].split("?")[0] or "mp4"
 
     tokens = [_slug(series) or "Anime3rb"]
     if season and episode:
         tokens.append(f"S{int(season):02d}E{int(episode):02d}")
-    tokens += [QUALITY, SOURCE, AUDIO, f"{SUBS}.SUBBED"]
-    filename = f"{'.'.join(t for t in tokens if t)}.{ext}"
+    tokens += [QUALITY, SOURCE, ENCODE, AUDIO_CODEC, AUDIO_CHANNELS,
+               AUDIO, f"{SUBS}.SUBBED"]
+    filename = f"{'.'.join(t for t in tokens if t)}-{RELEASE_GROUP}.{ext}"
 
-    hints = {"notWebReady": True, "filename": filename}
+    minutes = MOVIE_MINUTES if movie else EPISODE_MINUTES
+    size = MOVIE_BYTES if movie else EPISODE_BYTES
+
+    hints = {"notWebReady": True, "filename": filename, "videoSize": size}
     if binge_key:
         hints["bingeGroup"] = f"anime3rb-{binge_key}"
 
-    meta = f"{QUALITY} • {SOURCE} • ⚡ Instant • 🔊 {AUDIO} • 💬 {SUBS}"
+    meta = (f"{QUALITY} • {SOURCE} • {ENCODE} • {AUDIO_CODEC} {AUDIO_CHANNELS}"
+            f" • ⏱ {minutes}m • ⚡ Instant • 🔊 {AUDIO} • 💬 {SUBS}")
     return {
         "url": url,
         "name": f"{SERVICE_TAG} Anime3rb ⚡ {QUALITY}",
@@ -410,7 +425,8 @@ def _vod_or_series_stream(item_id, item_type) -> list:
             stream_id = movie.get("stream_id", item_id)
             url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
             name = data.get("info", {}).get("name") or movie.get("name", "Movie")
-            return [_stream_obj(url, name, name, binge_key=str(stream_id))]
+            return [_stream_obj(url, name, name, binge_key=str(stream_id),
+                                movie=True)]
         return []
     # series-type "movie" (a movie stored as a single-episode series)
     data = _series_info(item_id)
