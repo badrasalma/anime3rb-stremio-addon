@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.0.0",
+    "version": "8.1.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -192,7 +192,66 @@ def _find_by_epnum(data: dict, episode: int):
     return None
 
 
-def _build_stream(ep: dict) -> list:
+# ─── Stream metadata ───
+_RES_RE = re.compile(r"(\d{3,4})p")
+
+
+def _probe(url: str):
+    """Follow the redirect to the CDN to learn resolution and file size.
+
+    anime3rb's API exposes neither, but the signed CDN URL it redirects to ends
+    in `<height>p.<ext>` and answers HEAD with a Content-Length. Aggregators
+    (AIOStreams and friends) show nothing useful without these two.
+    """
+    try:
+        r = cffi_requests.head(url, impersonate="chrome", allow_redirects=True, timeout=12)
+    except Exception as e:
+        print(f"[Probe] failed: {e}")
+        return None, None
+    m = _RES_RE.search(str(r.url).split("?")[0])
+    size = r.headers.get("content-length", "")
+    return (f"{m.group(1)}p" if m else None), (int(size) if size.isdigit() else None)
+
+
+def _slug(text: str) -> str:
+    """Dot-separated ASCII token usable inside a release filename."""
+    return re.sub(r"\.+", ".", re.sub(r"[^A-Za-z0-9]+", ".", text or "")).strip(".")
+
+
+def _human_size(size: int) -> str:
+    return f"{size / 1024 ** 3:.2f} GB" if size >= 1024 ** 3 else f"{size / 1024 ** 2:.0f} MB"
+
+
+def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
+                binge_key: str = "") -> dict:
+    res, size = _probe(url)
+    ext = url.rsplit(".", 1)[-1].split("?")[0] or "mp4"
+
+    tokens = [_slug(series) or "Anime3rb"]
+    if season and episode:
+        tokens.append(f"S{int(season):02d}E{int(episode):02d}")
+    if res:
+        tokens.append(res)
+    tokens += ["WEB-DL", "Arabic"]
+    filename = f"{'.'.join(t for t in tokens if t)}.{ext}"
+
+    hints = {"notWebReady": True, "filename": filename}
+    if size:
+        hints["videoSize"] = size
+    if binge_key:
+        hints["bingeGroup"] = f"anime3rb-{binge_key}-{res or 'na'}"
+
+    meta = " • ".join(p for p in [res, "WEB-DL", _human_size(size) if size else None, "Arabic"] if p)
+    return {
+        "url": url,
+        "name": f"Anime3rb {res}" if res else "Anime3rb",
+        "title": f"{title}\n{meta}",
+        "description": f"{title}\n{meta}",
+        "behaviorHints": hints,
+    }
+
+
+def _build_stream(ep: dict, data: dict | None = None) -> list:
     """Build Stremio stream object from episode data."""
     if not ep:
         return []
@@ -202,11 +261,16 @@ def _build_stream(ep: dict) -> list:
         return []
     url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
     title = ep.get("title") or f"Episode {ep.get('episode_num', '?')}"
-    return [{
-        "url": url,
-        "title": f"Anime3rb: {title}",
-        "behaviorHints": {"notWebReady": True},
-    }]
+    info = (data or {}).get("info", {})
+    series = info.get("name", "")
+    return [_stream_obj(
+        url,
+        series,
+        title,
+        season=ep.get("season"),
+        episode=_ep_int(ep.get("episode_num", 0)) or None,
+        binge_key=str(info.get("series_id") or stream_id),
+    )]
 
 
 # ─── IMDB resolution ───
@@ -252,7 +316,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
             data = _series_info(season_parts[0])
             if not data:
                 return []
-            return _build_stream(_find_by_epnum(data, episode))
+            return _build_stream(_find_by_epnum(data, episode), data)
         # Multiple parts within one IMDB season -> continuous numbering across parts.
         target = episode
         for a3 in season_parts:
@@ -261,7 +325,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
                 return []
             eps = _episodes_in_order(data)
             if target <= len(eps):
-                return _build_stream(eps[target - 1])
+                return _build_stream(eps[target - 1], data)
             target -= len(eps)
         return []
 
@@ -282,7 +346,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
         # treat the given episode number as already-absolute.
         if not ep and abs_ep != episode:
             ep = _find_by_epnum(data, episode)
-        return _build_stream(ep)
+        return _build_stream(ep, data)
 
     # Messy multi-series without clean season map: concatenate by count.
     if str(season) in offsets:
@@ -296,7 +360,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
             return []
         eps = _episodes_in_order(data)
         if target <= len(eps):
-            return _build_stream(eps[target - 1])
+            return _build_stream(eps[target - 1], data)
         target -= len(eps)
     return []
 
@@ -333,7 +397,7 @@ def _get_kitsu_series_stream(stremio_id: str) -> list:
     ep = _find_by_epnum(data, episode)
     if not ep:
         print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
-    return _build_stream(ep)
+    return _build_stream(ep, data)
 
 
 def _get_kitsu_movie_stream(stremio_id: str) -> list:
@@ -363,18 +427,14 @@ def _vod_or_series_stream(item_id, item_type) -> list:
             stream_id = movie.get("stream_id", item_id)
             url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
             name = data.get("info", {}).get("name") or movie.get("name", "Movie")
-            return [{
-                "url": url,
-                "title": f"Anime3rb: {name}",
-                "behaviorHints": {"notWebReady": True},
-            }]
+            return [_stream_obj(url, name, name, binge_key=str(stream_id))]
         return []
     # series-type "movie" (a movie stored as a single-episode series)
     data = _series_info(item_id)
     if not data:
         return []
     eps = _episodes_in_order(data)
-    return _build_stream(eps[0]) if eps else []
+    return _build_stream(eps[0], data) if eps else []
 
 
 # ─── Health / Debug ───
