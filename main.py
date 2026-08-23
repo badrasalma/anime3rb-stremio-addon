@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.4.0",
+    "version": "8.5.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -201,6 +201,8 @@ QUALITY = "1080p"
 SOURCE = "WEB-DL"
 AUDIO = "Japanese"
 SUBS = "Arabic"
+# Aggregators derive the "cached" badge from a service tag in the stream name.
+SERVICE_TAG = "[TB+]"
 
 
 def _slug(text: str) -> str:
@@ -225,7 +227,7 @@ def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
     meta = f"{QUALITY} • {SOURCE} • ⚡ Instant • 🔊 {AUDIO} • 💬 {SUBS}"
     return {
         "url": url,
-        "name": f"Anime3rb ⚡ {QUALITY}",
+        "name": f"{SERVICE_TAG} Anime3rb ⚡ {QUALITY}",
         "title": f"{title}\n{meta}",
         "description": f"{title}\n{meta}",
         "behaviorHints": hints,
