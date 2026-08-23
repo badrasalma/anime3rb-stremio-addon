@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.3.0",
+    "version": "8.4.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -222,10 +222,10 @@ def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
     if binge_key:
         hints["bingeGroup"] = f"anime3rb-{binge_key}"
 
-    meta = f"{QUALITY} • {SOURCE} • {AUDIO} Audio • {SUBS} Subs"
+    meta = f"{QUALITY} • {SOURCE} • ⚡ Instant • 🔊 {AUDIO} • 💬 {SUBS}"
     return {
         "url": url,
-        "name": f"Anime3rb {QUALITY}",
+        "name": f"Anime3rb ⚡ {QUALITY}",
         "title": f"{title}\n{meta}",
         "description": f"{title}\n{meta}",
         "behaviorHints": hints,
