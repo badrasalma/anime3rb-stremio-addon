@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.2.0",
+    "version": "8.3.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -199,7 +199,8 @@ def _find_by_epnum(data: dict, episode: int):
 # instantly and aggregators still get parseable quality/source tokens.
 QUALITY = "1080p"
 SOURCE = "WEB-DL"
-LANGUAGE = "Arabic"
+AUDIO = "Japanese"
+SUBS = "Arabic"
 
 
 def _slug(text: str) -> str:
@@ -214,14 +215,14 @@ def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
     tokens = [_slug(series) or "Anime3rb"]
     if season and episode:
         tokens.append(f"S{int(season):02d}E{int(episode):02d}")
-    tokens += [QUALITY, SOURCE, LANGUAGE]
+    tokens += [QUALITY, SOURCE, AUDIO, f"{SUBS}.SUBBED"]
     filename = f"{'.'.join(t for t in tokens if t)}.{ext}"
 
     hints = {"notWebReady": True, "filename": filename}
     if binge_key:
         hints["bingeGroup"] = f"anime3rb-{binge_key}"
 
-    meta = f"{QUALITY} • {SOURCE} • {LANGUAGE}"
+    meta = f"{QUALITY} • {SOURCE} • {AUDIO} Audio • {SUBS} Subs"
     return {
         "url": url,
         "name": f"Anime3rb {QUALITY}",
