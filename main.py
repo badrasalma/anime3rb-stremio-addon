@@ -112,7 +112,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.1.0",
+    "version": "8.2.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -193,24 +193,13 @@ def _find_by_epnum(data: dict, episode: int):
 
 
 # ─── Stream metadata ───
-_RES_RE = re.compile(r"(\d{3,4})p")
-
-
-def _probe(url: str):
-    """Follow the redirect to the CDN to learn resolution and file size.
-
-    anime3rb's API exposes neither, but the signed CDN URL it redirects to ends
-    in `<height>p.<ext>` and answers HEAD with a Content-Length. Aggregators
-    (AIOStreams and friends) show nothing useful without these two.
-    """
-    try:
-        r = cffi_requests.head(url, impersonate="chrome", allow_redirects=True, timeout=12)
-    except Exception as e:
-        print(f"[Probe] failed: {e}")
-        return None, None
-    m = _RES_RE.search(str(r.url).split("?")[0])
-    size = r.headers.get("content-length", "")
-    return (f"{m.group(1)}p" if m else None), (int(size) if size.isdigit() else None)
+# anime3rb's API exposes neither resolution nor file size, and asking the CDN for
+# them costs a redirect round-trip per stream. The account is set to the highest
+# quality available, so we label streams instead of probing: the stream appears
+# instantly and aggregators still get parseable quality/source tokens.
+QUALITY = "1080p"
+SOURCE = "WEB-DL"
+LANGUAGE = "Arabic"
 
 
 def _slug(text: str) -> str:
@@ -218,33 +207,24 @@ def _slug(text: str) -> str:
     return re.sub(r"\.+", ".", re.sub(r"[^A-Za-z0-9]+", ".", text or "")).strip(".")
 
 
-def _human_size(size: int) -> str:
-    return f"{size / 1024 ** 3:.2f} GB" if size >= 1024 ** 3 else f"{size / 1024 ** 2:.0f} MB"
-
-
 def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
                 binge_key: str = "") -> dict:
-    res, size = _probe(url)
     ext = url.rsplit(".", 1)[-1].split("?")[0] or "mp4"
 
     tokens = [_slug(series) or "Anime3rb"]
     if season and episode:
         tokens.append(f"S{int(season):02d}E{int(episode):02d}")
-    if res:
-        tokens.append(res)
-    tokens += ["WEB-DL", "Arabic"]
+    tokens += [QUALITY, SOURCE, LANGUAGE]
     filename = f"{'.'.join(t for t in tokens if t)}.{ext}"
 
     hints = {"notWebReady": True, "filename": filename}
-    if size:
-        hints["videoSize"] = size
     if binge_key:
-        hints["bingeGroup"] = f"anime3rb-{binge_key}-{res or 'na'}"
+        hints["bingeGroup"] = f"anime3rb-{binge_key}"
 
-    meta = " • ".join(p for p in [res, "WEB-DL", _human_size(size) if size else None, "Arabic"] if p)
+    meta = f"{QUALITY} • {SOURCE} • {LANGUAGE}"
     return {
         "url": url,
-        "name": f"Anime3rb {res}" if res else "Anime3rb",
+        "name": f"Anime3rb {QUALITY}",
         "title": f"{title}\n{meta}",
         "description": f"{title}\n{meta}",
         "behaviorHints": hints,
