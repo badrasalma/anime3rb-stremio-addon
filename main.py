@@ -13,7 +13,7 @@ Supported incoming IDs:
 Mapping data (data/imdb_map.json, data/kitsu_map.json) maps a stable series
 identity -> anime3rb series id. Episode availability is always fetched live.
 For long single-series anime (One Piece, Conan, ...) IMDB season/episode is
-converted to an absolute episode number using pre-baked TVDB offsets.
+converted to an absolute episode number using pre-baked TMDB offsets.
 """
 import json
 import os
