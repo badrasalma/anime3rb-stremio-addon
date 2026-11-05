@@ -29,8 +29,8 @@ ANIME_LISTS_URL = "https://raw.githubusercontent.com/Fribb/anime-lists/master/an
 MANAMI_URL = ("https://github.com/manami-project/anime-offline-database/"
               "releases/download/latest/anime-offline-database-minified.json")
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
-USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
-PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
+USERNAME = os.environ["ANIME3RB_USER"]
+PASSWORD = os.environ["ANIME3RB_PASS"]
 
 
 def _download_json(url: str):

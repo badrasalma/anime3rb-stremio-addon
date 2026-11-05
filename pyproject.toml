@@ -6,6 +6,5 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi[standard]>=0.115.0",
     "uvicorn>=0.34.0",
-    "cloudscraper>=1.2.71",
-    "requests>=2.31.0",
+    "curl_cffi>=0.7.0",
 ]

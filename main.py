@@ -1,4 +1,4 @@
-"""Anime3rb Stream Addon v8.0.0
+"""Anime3rb Stream Addon v10.0.0
 
 Stream-only addon. No catalogs, no episode cache.
 Every stream request fetches LIVE from anime3rb API via curl_cffi, so an episode
@@ -13,7 +13,8 @@ Supported incoming IDs:
 Mapping data (data/imdb_map.json, data/kitsu_map.json) maps a stable series
 identity -> anime3rb series id. Episode availability is always fetched live.
 For long single-series anime (One Piece, Conan, ...) IMDB season/episode is
-converted to an absolute episode number using pre-baked TVDB offsets.
+converted to an absolute episode number using TVDB (aired order) seasons.
+Series are resolved live via resolver.py (TVDB); the map is only a fallback.
 """
 import json
 import os
@@ -26,10 +27,12 @@ from curl_cffi import requests as cffi_requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import resolver
+
 # ─── Configuration ───
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
-USERNAME = os.environ.get("ANIME3RB_USER", "bbnmnbb")
-PASSWORD = os.environ.get("ANIME3RB_PASS", "as209509")
+USERNAME = os.environ["ANIME3RB_USER"]
+PASSWORD = os.environ["ANIME3RB_PASS"]
 
 # ─── Maps ───
 DATA_DIR = Path(__file__).parent / "data"
@@ -88,6 +91,9 @@ def _series_info(series_id: str):
     return data
 
 
+_catalog = resolver.Catalog(api_call)
+
+
 # ─── FastAPI App ───
 app = FastAPI()
 app.add_middleware(
@@ -112,7 +118,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.0.0",
+    "version": "10.0.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -192,7 +198,64 @@ def _find_by_epnum(data: dict, episode: int):
     return None
 
 
-def _build_stream(ep: dict) -> list:
+# ─── Stream metadata ───
+# anime3rb's API exposes neither resolution nor file size, and asking the CDN for
+# them costs a redirect round-trip per stream. The account is set to the highest
+# quality available, so we label streams instead of probing: the stream appears
+# instantly and aggregators still get parseable quality/source tokens.
+QUALITY = "1080p"
+SOURCE = "WEB-DL"
+AUDIO = "Japanese"
+SUBS = "Arabic"
+ENCODE = "x264"
+AUDIO_CODEC = "AAC"
+AUDIO_CHANNELS = "2.0"
+RELEASE_GROUP = "Anime3rb"
+# Aggregators derive the "cached" badge from a service tag in the stream name.
+SERVICE_TAG = "[TB+]"
+# Typical runtimes/sizes for a 1080p web release, used to fill the aggregator's
+# duration/size/bitrate fields (anime3rb's API reports neither).
+EPISODE_MINUTES = 24
+MOVIE_MINUTES = 100
+EPISODE_BYTES = 734003200  # 700 MiB
+MOVIE_BYTES = 2684354560  # 2.5 GiB
+
+
+def _slug(text: str) -> str:
+    """Dot-separated ASCII token usable inside a release filename."""
+    return re.sub(r"\.+", ".", re.sub(r"[^A-Za-z0-9]+", ".", text or "")).strip(".")
+
+
+def _stream_obj(url: str, series: str, title: str, season=None, episode=None,
+                binge_key: str = "", movie: bool = False) -> dict:
+    ext = url.rsplit(".", 1)[-1].split("?")[0] or "mp4"
+
+    tokens = [_slug(series) or "Anime3rb"]
+    if season and episode:
+        tokens.append(f"S{int(season):02d}E{int(episode):02d}")
+    tokens += [QUALITY, SOURCE, ENCODE, AUDIO_CODEC, AUDIO_CHANNELS,
+               AUDIO, f"{SUBS}.SUBBED"]
+    filename = f"{'.'.join(t for t in tokens if t)}-{RELEASE_GROUP}.{ext}"
+
+    minutes = MOVIE_MINUTES if movie else EPISODE_MINUTES
+    size = MOVIE_BYTES if movie else EPISODE_BYTES
+
+    hints = {"notWebReady": True, "filename": filename, "videoSize": size}
+    if binge_key:
+        hints["bingeGroup"] = f"anime3rb-{binge_key}"
+
+    meta = (f"{QUALITY} • {SOURCE} • {ENCODE} • {AUDIO_CODEC} {AUDIO_CHANNELS}"
+            f" • ⏱ {minutes}m • ⚡ Instant • 🔊 {AUDIO} • 💬 {SUBS}")
+    return {
+        "url": url,
+        "name": f"{SERVICE_TAG} Anime3rb ⚡ {QUALITY}",
+        "title": f"{title}\n{meta}",
+        "description": f"{title}\n{meta}",
+        "behaviorHints": hints,
+    }
+
+
+def _build_stream(ep: dict, data: dict | None = None) -> list:
     """Build Stremio stream object from episode data."""
     if not ep:
         return []
@@ -202,11 +265,16 @@ def _build_stream(ep: dict) -> list:
         return []
     url = f"{BASE_URL}/series/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
     title = ep.get("title") or f"Episode {ep.get('episode_num', '?')}"
-    return [{
-        "url": url,
-        "title": f"Anime3rb: {title}",
-        "behaviorHints": {"notWebReady": True},
-    }]
+    info = (data or {}).get("info", {})
+    series = info.get("name", "")
+    return [_stream_obj(
+        url,
+        series,
+        title,
+        season=ep.get("season"),
+        episode=_ep_int(ep.get("episode_num", 0)) or None,
+        binge_key=str(info.get("series_id") or stream_id),
+    )]
 
 
 # ─── IMDB resolution ───
@@ -240,6 +308,23 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
     except (ValueError, IndexError):
         return []
 
+    try:
+        rec = _imdb_series.get(imdb) or {}
+        found = resolver.resolve_series(imdb, season, episode, _catalog, _series_info,
+                                        _find_by_epnum, _episodes_in_order,
+                                        rec.get("ordered") or (), rec.get("tvdb"))
+        return _build_stream(*found) if found else []
+    except resolver.Unresolved as e:
+        print(f"[Stream] Live resolve failed for {stremio_id}: {e}; trying static map")
+    except Exception as e:
+        print(f"[Stream] Live resolve error for {stremio_id}: {e}; trying static map")
+    return _static_imdb_series_stream(imdb, season, episode)
+
+
+def _static_imdb_series_stream(imdb: str, season: int, episode: int) -> list:
+    """Fallback: pre-built map (data/imdb_map.json)."""
+    if season <= 0:
+        return []
     rec = _imdb_series.get(imdb)
     if not rec:
         print(f"[Stream] No IMDB mapping for {imdb}")
@@ -252,7 +337,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
             data = _series_info(season_parts[0])
             if not data:
                 return []
-            return _build_stream(_find_by_epnum(data, episode))
+            return _build_stream(_find_by_epnum(data, episode), data)
         # Multiple parts within one IMDB season -> continuous numbering across parts.
         target = episode
         for a3 in season_parts:
@@ -261,7 +346,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
                 return []
             eps = _episodes_in_order(data)
             if target <= len(eps):
-                return _build_stream(eps[target - 1])
+                return _build_stream(eps[target - 1], data)
             target -= len(eps)
         return []
 
@@ -276,19 +361,15 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
         # Highest episode number present (anime3rb numbering may have gaps, so the
         # max number is what matters for the last season's length, not the count).
         max_epnum = _ep_int(eps_ordered[-1].get("episode_num", 0)) if eps_ordered else 0
+        if str(season) not in offsets:
+            return []
         abs_ep = _abs_episode(offsets, season, episode, max_epnum)
-        ep = _find_by_epnum(data, abs_ep)
-        # Safety net: if the season-offset conversion overshoots the series,
-        # treat the given episode number as already-absolute.
-        if not ep and abs_ep != episode:
-            ep = _find_by_epnum(data, episode)
-        return _build_stream(ep)
+        return _build_stream(_find_by_epnum(data, abs_ep), data)
 
     # Messy multi-series without clean season map: concatenate by count.
-    if str(season) in offsets:
-        abs_ep = offsets[str(season)] + episode
-    else:
-        abs_ep = episode
+    if str(season) not in offsets:
+        return []
+    abs_ep = offsets[str(season)] + episode
     target = abs_ep
     for a3 in ordered:
         data = _series_info(a3)
@@ -296,7 +377,7 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
             return []
         eps = _episodes_in_order(data)
         if target <= len(eps):
-            return _build_stream(eps[target - 1])
+            return _build_stream(eps[target - 1], data)
         target -= len(eps)
     return []
 
@@ -304,10 +385,17 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
 def _get_imdb_movie_stream(stremio_id: str) -> list:
     imdb = stremio_id.split(":")[0]
     rec = _imdb_movies.get(imdb)
-    if not rec:
+    if rec:
+        return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+    try:
+        vod_id = resolver.resolve_movie(imdb, _catalog)
+    except Exception as e:
+        print(f"[Stream] Live movie resolve error for {imdb}: {e}")
+        vod_id = None
+    if not vod_id:
         print(f"[Stream] No IMDB movie mapping for {imdb}")
         return []
-    return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+    return _vod_or_series_stream(vod_id, "vod")
 
 
 # ─── Kitsu resolution (legacy) ───
@@ -333,7 +421,7 @@ def _get_kitsu_series_stream(stremio_id: str) -> list:
     ep = _find_by_epnum(data, episode)
     if not ep:
         print(f"[Stream] Episode {episode} not found in series {series_id} (kitsu:{kitsu_id})")
-    return _build_stream(ep)
+    return _build_stream(ep, data)
 
 
 def _get_kitsu_movie_stream(stremio_id: str) -> list:
@@ -363,18 +451,15 @@ def _vod_or_series_stream(item_id, item_type) -> list:
             stream_id = movie.get("stream_id", item_id)
             url = f"{BASE_URL}/movie/{USERNAME}/{PASSWORD}/{stream_id}.{container}"
             name = data.get("info", {}).get("name") or movie.get("name", "Movie")
-            return [{
-                "url": url,
-                "title": f"Anime3rb: {name}",
-                "behaviorHints": {"notWebReady": True},
-            }]
+            return [_stream_obj(url, name, name, binge_key=str(stream_id),
+                                movie=True)]
         return []
     # series-type "movie" (a movie stored as a single-episode series)
     data = _series_info(item_id)
     if not data:
         return []
     eps = _episodes_in_order(data)
-    return _build_stream(eps[0]) if eps else []
+    return _build_stream(eps[0], data) if eps else []
 
 
 # ─── Health / Debug ───
@@ -382,6 +467,7 @@ def _vod_or_series_stream(item_id, item_type) -> list:
 def health():
     return {
         "status": "ok",
+        "live_resolver": bool(resolver.TVDB_KEY),
         "version": MANIFEST["version"],
         "kitsu_map_size": len(_kitsu_map),
         "imdb_series_size": len(_imdb_series),
