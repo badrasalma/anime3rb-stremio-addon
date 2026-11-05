@@ -1,4 +1,4 @@
-"""Anime3rb Stream Addon v8.0.0
+"""Anime3rb Stream Addon v10.0.0
 
 Stream-only addon. No catalogs, no episode cache.
 Every stream request fetches LIVE from anime3rb API via curl_cffi, so an episode
@@ -13,7 +13,8 @@ Supported incoming IDs:
 Mapping data (data/imdb_map.json, data/kitsu_map.json) maps a stable series
 identity -> anime3rb series id. Episode availability is always fetched live.
 For long single-series anime (One Piece, Conan, ...) IMDB season/episode is
-converted to an absolute episode number using pre-baked TMDB offsets.
+converted to an absolute episode number using TVDB (aired order) seasons.
+Series are resolved live via resolver.py (TVDB); the map is only a fallback.
 """
 import json
 import os
@@ -117,7 +118,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "9.0.0",
+    "version": "10.0.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -308,9 +309,10 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
         return []
 
     try:
-        known = (_imdb_series.get(imdb) or {}).get("ordered") or ()
+        rec = _imdb_series.get(imdb) or {}
         found = resolver.resolve_series(imdb, season, episode, _catalog, _series_info,
-                                        _find_by_epnum, _episodes_in_order, known)
+                                        _find_by_epnum, _episodes_in_order,
+                                        rec.get("ordered") or (), rec.get("tvdb"))
         return _build_stream(*found) if found else []
     except resolver.Unresolved as e:
         print(f"[Stream] Live resolve failed for {stremio_id}: {e}; trying static map")
@@ -465,7 +467,7 @@ def _vod_or_series_stream(item_id, item_type) -> list:
 def health():
     return {
         "status": "ok",
-        "live_resolver": bool(resolver.TMDB_KEY),
+        "live_resolver": bool(resolver.TVDB_KEY),
         "version": MANIFEST["version"],
         "kitsu_map_size": len(_kitsu_map),
         "imdb_series_size": len(_imdb_series),

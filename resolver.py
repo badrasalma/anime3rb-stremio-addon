@@ -1,14 +1,15 @@
-"""Live IMDb -> anime3rb resolver on TMDB numbering.
+"""Live IMDb -> anime3rb resolver on TVDB (aired order) numbering.
 
 Nothing here depends on a pre-built map, so brand-new anime and brand-new
 seasons resolve the moment anime3rb lists them.
 
-anime3rb lists every season/cour as its own series (Japanese style); TMDB groups
+anime3rb lists every season/cour as its own series (Japanese style); TVDB groups
 them as seasons of one show. For a request (imdb, S, E):
-  1. TMDB: imdb -> show -> every title variant + every season's episode list.
+  1. TVDB: imdb -> show -> every title variant (plus TMDB's) + every season's
+     episode list.
   2. anime3rb series (TV/ONA) whose name is one of those titles (optionally
      followed by a season marker / subtitle) are the show's parts.
-  3. Each part is assigned to the TMDB season whose air window contains its
+  3. Each part is assigned to the TVDB season whose air window contains its
      release date. Parts of one season are concatenated in release order.
   4. A season without its own part continues the most recent earlier part
      (long absolute-numbered series such as One Piece / Conan).
@@ -25,6 +26,8 @@ from datetime import date, timedelta
 
 TMDB_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_BASE = "https://api.themoviedb.org/3"
+TVDB_KEY = os.environ.get("TVDB_API_KEY", "")
+TVDB_BASE = "https://api4.thetvdb.com/v4"
 
 SERIES_CATEGORIES = {"1", "4"}  # TV series, ONA
 LIST_TTL = 900
@@ -34,6 +37,7 @@ INFO_TTL = 300
 WINDOW_BEFORE = timedelta(days=21)
 WINDOW_AFTER = timedelta(days=3)
 EARLY_RELEASE = timedelta(days=90)
+LATE_LISTING = timedelta(days=365)
 
 _cache: dict = {}
 
@@ -75,14 +79,33 @@ def _usable(v: str) -> bool:
     return len(v) >= 3 and not v.isdigit()
 
 
+_SEQUEL_TAG = re.compile(r"[rsz]|r\d*|plus|er|lv \d+|vs .+")  # Sailor Moon R/S, Lv.2, "vs. U-20"
+
+
+def _seasonish(rem: str) -> bool:
+    return (bool(_SEASONISH.match(rem)) or rem == "hen" or rem.endswith(" hen")
+            or bool(_SEQUEL_TAG.fullmatch(rem)))
+
+
 def _name_matches(variant: str, full: str, head: str) -> bool:
     if variant in (full, head):
         return True
+    vn = variant.replace(" ", "")
     for x in (full, head):
-        if x.startswith(variant + " "):
-            rem = x[len(variant) + 1:]
-            if _SEASONISH.match(rem) or rem == "hen" or rem.endswith(" hen"):
-                return True
+        if x.startswith(variant + " ") and _seasonish(x[len(variant) + 1:]):
+            return True
+        # Romanization spacing differs between sources ("shichau zo" / "shichauzo").
+        if not x.replace(" ", "").startswith(vn):
+            continue
+        if x.replace(" ", "") == vn:
+            return True
+        i = x.find(" ")
+        while i != -1:
+            if x[:i].replace(" ", "") == vn:
+                if _seasonish(x[i + 1:]):
+                    return True
+                break
+            i = x.find(" ", i + 1)
     return False
 
 
@@ -113,13 +136,7 @@ def _tmdb(path: str, **params):
     return {}
 
 
-def _titles(d: dict, name_key: str) -> list:
-    out = [d.get(name_key), d.get("original_" + name_key)]
-    alts = d.get("alternative_titles") or {}
-    for a in alts.get("results") or alts.get("titles") or []:
-        out.append(a.get("title"))
-    for t in (d.get("translations") or {}).get("translations", []):
-        out.append((t.get("data") or {}).get(name_key))
+def _dedup_titles(out) -> list:
     seen, res = set(), []
     for t in out:
         v = loose(t or "")
@@ -129,28 +146,121 @@ def _titles(d: dict, name_key: str) -> list:
     return res
 
 
+def _titles(d: dict, name_key: str) -> list:
+    out = [d.get(name_key), d.get("original_" + name_key)]
+    alts = d.get("alternative_titles") or {}
+    for a in alts.get("results") or alts.get("titles") or []:
+        out.append(a.get("title"))
+    for t in (d.get("translations") or {}).get("translations", []):
+        out.append((t.get("data") or {}).get(name_key))
+    return _dedup_titles(out)
+
+
 def _tmdb_find(imdb: str) -> dict:
     return _cached(("find", imdb), TMDB_TTL,
                    lambda: _tmdb(f"/find/{imdb}", external_source="imdb_id"))
 
 
-def _tmdb_show(tv_id: int) -> dict:
+def _tmdb_tv_titles(imdb: str) -> list:
+    """Extra title variants from TMDB (often has Arabic/romaji names TVDB lacks)."""
+    if not TMDB_KEY:
+        return []
+    try:
+        tv = (_tmdb_find(imdb) or {}).get("tv_results") or []
+        if not tv:
+            return []
+        tv_id = tv[0]["id"]
+        return _cached(("tvtitles", tv_id), TMDB_TTL, lambda: _titles(
+            _tmdb(f"/tv/{tv_id}", append_to_response="alternative_titles,translations"),
+            "name")) or []
+    except Exception as e:
+        print(f"[Resolver] TMDB titles failed for {imdb}: {e}")
+        return []
+
+
+# ─── TVDB ───
+_tvdb_token = {"value": "", "at": 0.0}
+TVDB_TOKEN_TTL = 20 * 86400
+
+
+def _tvdb_login(force: bool = False) -> str:
+    now = time.time()
+    if force or not _tvdb_token["value"] or now - _tvdb_token["at"] > TVDB_TOKEN_TTL:
+        req = urllib.request.Request(
+            f"{TVDB_BASE}/login", data=json.dumps({"apikey": TVDB_KEY}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            _tvdb_token["value"] = json.load(r)["data"]["token"]
+        _tvdb_token["at"] = now
+    return _tvdb_token["value"]
+
+
+def _tvdb(path: str, **params):
+    url = f"{TVDB_BASE}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    relogin = False
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                url, headers={"Authorization": "Bearer " + _tvdb_login(relogin)})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {}
+            relogin = e.code == 401
+            if e.code not in (401, 429) and e.code < 500 or attempt == 2:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            relogin = False
+            if attempt == 2:
+                raise
+        time.sleep(1 + attempt)
+    return {}
+
+
+def _tvdb_find(imdb: str, hint=None):
     def load():
-        d = _tmdb(f"/tv/{tv_id}", append_to_response="alternative_titles,translations")
+        for r in (_tvdb(f"/search/remoteid/{imdb}") or {}).get("data") or []:
+            sid = (r.get("series") or {}).get("id")
+            if sid:
+                return int(sid)
+        return 0
+    sid = _cached(("tvdbfind", imdb), TMDB_TTL, load)
+    return sid or (int(hint) if hint else 0)
+
+
+def _tvdb_show(tvdb_id: int) -> dict:
+    """{"titles", "seasons": {n: [{"episode_number", "air_date"}]}, "ongoing"}."""
+    def load():
+        d = (_tvdb(f"/series/{tvdb_id}/extended", meta="translations", short="true")
+             or {}).get("data")
         if not d:
             return None
-        nums = [s["season_number"] for s in d.get("seasons", []) if s.get("season_number")]
+        tr = d.get("translations") or {}
+        names = [d.get("name")]
+        names += [t.get("name") for t in tr.get("nameTranslations") or []]
+        names += [a.get("name") for a in tr.get("alias") or []]
+        names += [a.get("name") for a in d.get("aliases") or []]
         seasons = {}
-        for i in range(0, len(nums), 20):
-            chunk = nums[i:i + 20]
-            sd = _tmdb(f"/tv/{tv_id}",
-                       append_to_response=",".join(f"season/{n}" for n in chunk))
-            for n in chunk:
-                eps = (sd.get(f"season/{n}") or {}).get("episodes") or []
-                seasons[n] = eps
-        return {"titles": _titles(d, "name"), "seasons": seasons,
-                "ongoing": bool(d.get("in_production"))}
-    return _cached(("tv", tv_id), TMDB_TTL, load)
+        page = 0
+        while page < 20:
+            r = _tvdb(f"/series/{tvdb_id}/episodes/default", page=page) or {}
+            for e in (r.get("data") or {}).get("episodes") or []:
+                n = e.get("seasonNumber") or 0
+                if n > 0:
+                    seasons.setdefault(n, []).append(
+                        {"episode_number": e.get("number"), "air_date": e.get("aired")})
+            if not (r.get("links") or {}).get("next"):
+                break
+            page += 1
+        for n in seasons:
+            seasons[n].sort(key=lambda e: e["episode_number"] or 0)
+        status = ((d.get("status") or {}).get("name") or "").lower()
+        return {"titles": _dedup_titles(names), "seasons": seasons,
+                "ongoing": status in ("continuing", "upcoming", "")}
+    return _cached(("tvdb", tvdb_id), TMDB_TTL, load)
 
 
 def _tmdb_movie(movie_id: int) -> dict:
@@ -236,15 +346,26 @@ def _parts_by_season(show: dict, catalog: Catalog, force: bool, known=()):
             cands.append(s)  # "<title>: <arc/spin-off subtitle>"
             side.add(s["id"])
     windows = _season_windows(show["seasons"], show.get("ongoing", True))
-    parts = {}
+    parts, late = {}, []
     for c in cands:
         n = next((n for n, start, end in windows if start <= c["date"] <= end), None)
         if n is None:
-            # Streamed early (e.g. Netflix ONA weeks before the TV broadcast TMDB dates).
+            # Streamed early (e.g. Netflix ONA weeks before the TV broadcast dates).
             n = next((n for n, start, end in windows
                       if c["date"] < start <= c["date"] + EARLY_RELEASE), None)
         if n is not None:
             parts.setdefault(n, []).append(c)
+        elif c["id"] not in side:
+            late.append(c)
+    # Exact-name entries dated far from every season (source lists the original
+    # broadcast date differently): give them to the latest earlier season that
+    # nothing else claimed.
+    for c in sorted(late, key=lambda c: c["date"]):
+        free = [n for n, start, end in windows
+                if start <= c["date"] <= end + LATE_LISTING and n not in parts]
+        if free and free[-1] == max((n for n, start, _ in windows if start <= c["date"]),
+                                    default=None):
+            parts[free[-1]] = [c]
     for n in parts:
         # Main/season-numbered entries first; subtitle-only entries follow them.
         parts[n].sort(key=lambda c: (c["id"] in side, c["date"],
@@ -300,7 +421,7 @@ def _load_part(cand, series_info, eps_in_order):
 
 
 def _position_in_season(seasons: dict, season: int, episode: int):
-    """(season, 1-based position) per TMDB, accepting within-season or absolute numbers."""
+    """(season, 1-based position) per TVDB, accepting within-season or absolute numbers."""
     eps = seasons.get(season)
     if not eps:
         return None
@@ -319,20 +440,27 @@ def _position_in_season(seasons: dict, season: int, episode: int):
     return None
 
 
+def series_show(imdb: str, tvdb_hint=None) -> dict:
+    """TVDB seasons + title variants from TVDB and TMDB."""
+    tvdb_id = _tvdb_find(imdb, tvdb_hint)
+    if not tvdb_id:
+        raise Unresolved("imdb not on TVDB")
+    show = _tvdb_show(tvdb_id)
+    if not show:
+        raise Unresolved("TVDB show missing")
+    return dict(show, titles=_dedup_titles(show["titles"] + _tmdb_tv_titles(imdb)))
+
+
 def resolve_series(imdb: str, season: int, episode: int, catalog: Catalog,
-                   series_info, find_by_epnum, episodes_in_order, known=()):
+                   series_info, find_by_epnum, episodes_in_order, known=(),
+                   tvdb_hint=None):
     """Return (episode_dict, series_info_data) or None if not (yet) available.
     Raises Unresolved when the show can't be mapped live."""
-    if not TMDB_KEY:
-        raise Unresolved("no TMDB key")
+    if not TVDB_KEY:
+        raise Unresolved("no TVDB key")
     if season <= 0:
         return None
-    tv = (_tmdb_find(imdb) or {}).get("tv_results") or []
-    if not tv:
-        raise Unresolved("imdb not on TMDB")
-    show = _tmdb_show(tv[0]["id"])
-    if not show:
-        raise Unresolved("TMDB show missing")
+    show = series_show(imdb, tvdb_hint)
     seasons = show["seasons"]
     pos = _position_in_season(seasons, season, episode)
     if not pos:
@@ -353,7 +481,7 @@ def resolve_series(imdb: str, season: int, episode: int, catalog: Catalog,
             loaded[key] = _load_part(c, series_info, episodes_in_order)
         return loaded[key]
 
-    # Walk seasons in order, tracking where each anime3rb part starts on the TMDB
+    # Walk seasons in order, tracking where each anime3rb part starts on the TVDB
     # absolute timeline. A season whose episodes an earlier long-running part
     # already covers (One Piece) keeps that part; side entries listed in its
     # window (recaps/remakes) are ignored.
