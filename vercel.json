@@ -2,7 +2,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "includeFiles": "{main.py,data/*.json}"
+      "includeFiles": "{main.py,resolver.py,data/*.json}"
     }
   },
   "routes": [

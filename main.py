@@ -26,6 +26,8 @@ from curl_cffi import requests as cffi_requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import resolver
+
 # ─── Configuration ───
 BASE_URL = os.environ.get("ANIME3RB_URL", "https://anime3rb.vip")
 USERNAME = os.environ["ANIME3RB_USER"]
@@ -88,6 +90,9 @@ def _series_info(series_id: str):
     return data
 
 
+_catalog = resolver.Catalog(api_call)
+
+
 # ─── FastAPI App ───
 app = FastAPI()
 app.add_middleware(
@@ -112,7 +117,7 @@ def stremio_response(data):
 # ─── Manifest ───
 MANIFEST = {
     "id": "com.anime3rb.stream",
-    "version": "8.6.0",
+    "version": "9.0.0",
     "name": "Anime3rb بث",
     "description": "روابط بث مباشرة من anime3rb — حلقات جديدة فوراً (IMDB + Kitsu)",
     "logo": "https://anime3rb.vip/favicon.ico",
@@ -302,6 +307,22 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
     except (ValueError, IndexError):
         return []
 
+    try:
+        known = (_imdb_series.get(imdb) or {}).get("ordered") or ()
+        found = resolver.resolve_series(imdb, season, episode, _catalog, _series_info,
+                                        _find_by_epnum, _episodes_in_order, known)
+        return _build_stream(*found) if found else []
+    except resolver.Unresolved as e:
+        print(f"[Stream] Live resolve failed for {stremio_id}: {e}; trying static map")
+    except Exception as e:
+        print(f"[Stream] Live resolve error for {stremio_id}: {e}; trying static map")
+    return _static_imdb_series_stream(imdb, season, episode)
+
+
+def _static_imdb_series_stream(imdb: str, season: int, episode: int) -> list:
+    """Fallback: pre-built map (data/imdb_map.json)."""
+    if season <= 0:
+        return []
     rec = _imdb_series.get(imdb)
     if not rec:
         print(f"[Stream] No IMDB mapping for {imdb}")
@@ -338,19 +359,15 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
         # Highest episode number present (anime3rb numbering may have gaps, so the
         # max number is what matters for the last season's length, not the count).
         max_epnum = _ep_int(eps_ordered[-1].get("episode_num", 0)) if eps_ordered else 0
+        if str(season) not in offsets:
+            return []
         abs_ep = _abs_episode(offsets, season, episode, max_epnum)
-        ep = _find_by_epnum(data, abs_ep)
-        # Safety net: if the season-offset conversion overshoots the series,
-        # treat the given episode number as already-absolute.
-        if not ep and abs_ep != episode:
-            ep = _find_by_epnum(data, episode)
-        return _build_stream(ep, data)
+        return _build_stream(_find_by_epnum(data, abs_ep), data)
 
     # Messy multi-series without clean season map: concatenate by count.
-    if str(season) in offsets:
-        abs_ep = offsets[str(season)] + episode
-    else:
-        abs_ep = episode
+    if str(season) not in offsets:
+        return []
+    abs_ep = offsets[str(season)] + episode
     target = abs_ep
     for a3 in ordered:
         data = _series_info(a3)
@@ -366,10 +383,17 @@ def _get_imdb_series_stream(stremio_id: str) -> list:
 def _get_imdb_movie_stream(stremio_id: str) -> list:
     imdb = stremio_id.split(":")[0]
     rec = _imdb_movies.get(imdb)
-    if not rec:
+    if rec:
+        return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+    try:
+        vod_id = resolver.resolve_movie(imdb, _catalog)
+    except Exception as e:
+        print(f"[Stream] Live movie resolve error for {imdb}: {e}")
+        vod_id = None
+    if not vod_id:
         print(f"[Stream] No IMDB movie mapping for {imdb}")
         return []
-    return _vod_or_series_stream(rec.get("id"), rec.get("type"))
+    return _vod_or_series_stream(vod_id, "vod")
 
 
 # ─── Kitsu resolution (legacy) ───
@@ -441,6 +465,7 @@ def _vod_or_series_stream(item_id, item_type) -> list:
 def health():
     return {
         "status": "ok",
+        "live_resolver": bool(resolver.TMDB_KEY),
         "version": MANIFEST["version"],
         "kitsu_map_size": len(_kitsu_map),
         "imdb_series_size": len(_imdb_series),
